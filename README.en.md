@@ -2,22 +2,23 @@
 
 [中文](README.md) · **English** · [日本語](README.ja.md)
 
-An unofficial film-look experiment for the **Sony a5100 / ILCE-5100**. It references the hardware color-processing approach in [bonyback1's Ricoh mod](https://github.com/bonyback1/sony-pmca-ricoh-mod) and uses [Fujifilm's publicly available GFX ETERNA 55 LUTs](https://www.fujifilm-x.com/global/support/download/lut/) as color-research references for photographs and experimental video.
+An unofficial in-camera film-look experiment for the **Sony a6000 / ILCE-6000**. This repository adapts and validates [ukiki0718-netizen/sony-a5100-film-studio](https://github.com/ukiki0718-netizen/sony-a5100-film-studio) for the A6000. It references the hardware color-processing approach in [bonyback1's Ricoh mod](https://github.com/bonyback1/sony-pmca-ricoh-mod) and uses [Fujifilm's publicly available GFX ETERNA 55 LUTs](https://www.fujifilm-x.com/global/support/download/lut/) as color-research references for photographs and experimental video.
 
 **Version: 0.2.0-alpha; on-camera version: 0.2a; app name: 胶片工坊.** Documentation is available in three languages; the camera UI is currently primarily Chinese.
 
-**Renamed to Film Studio (胶片工坊), combining ten Fujifilm-reference and five upstream Ricoh/street-style presets, fifteen in total.** Menu labels use 富士 / 理光 prefixes. The package and signing certificate are retained for an in-place update from 富士风格. The combined build installed and launched on the a5100, with successful parameter-application logs for selected presets; saved photographs/video from this version remain unverified. [0.1.3-alpha](https://github.com/ukiki0718-netizen/sony-a5100-film-studio/releases/tag/v0.1.3-alpha) remains available for rollback.
+**Renamed to Film Studio (胶片工坊), combining ten Fujifilm-reference and five upstream Ricoh/street-style presets, fifteen in total.** Menu labels use 富士 / 理光 prefixes. The package and signing certificate are retained for an in-place update from 富士风格. This repository build has been installed and launched on a **Sony a6000 / ILCE-6000**, and look switching produces visible real-time color changes in preview. Saved still/video behavior should still be verified per version. [0.1.3-alpha](https://github.com/ukiki0718-netizen/sony-a5100-film-studio/releases/tag/v0.1.3-alpha) remains available for rollback.
 
 <a id="compatibility"></a>
 
 ## Camera compatibility
 
-**Only the a5100 has been tested by this project. This app does not work with every Sony camera.**
+**The Sony a6000 / ILCE-6000 has been tested by this repository and is its primary target. This app does not work with every Sony camera.**
 
 | Model | Status in this project |
 | --- | --- |
-| **a5100 / ILCE-5100, firmware 1.10** | Tested within the feature/version limits documented below |
-| a6000, a6300, a6500 | PMCA candidates listed upstream; this version is untested |
+| **a6000 / ILCE-6000** | **Primary target of this repository; installed, launched and confirmed to change preview color in real time** |
+| a5100 / ILCE-5100, firmware 1.10 | Primary target of the upstream original project; more extensive upstream validation exists |
+| a6300, a6500 | PMCA candidates listed upstream; untested in this repository |
 | a7, a7R, a7S, a7 II, a7R II, a7S II | PMCA candidates listed upstream; this version is untested |
 | RX100 III/IV/V, RX10 II/III, RX1R II, HX90 | PMCA candidates listed upstream; this version is untested |
 | a6400, a6700, a7 III, a7C | Do not support the PlayMemories Camera Apps installation platform required here |
@@ -25,7 +26,7 @@ An unofficial film-look experiment for the **Sony a5100 / ILCE-5100**. It refere
 
 Candidates come from the [upstream model list](https://github.com/bonyback1/sony-pmca-ricoh-mod/blob/7c565898562c73c5073c54dfc831c8c3df9c24cf/README.md), not tests of this project's added video and strength features. PMCA is the on-camera app platform required here; MTP or phone remote control alone does not establish PMCA support.
 
-**The current video menu follows a5100 specifications and includes no 4K choices.** It does not promise every native format, frame rate or bitrate on other models. Successful installation must be followed by separate checks of preview, look selection, JPEG persistence, recording start/stop, saved-video playback and color reset after exit. Actual colors may differ across models. Reports should identify model, firmware, app version and exactly what was tested.
+**The current video menu is inherited from the original a5100 implementation and includes no 4K choices.** It does not promise every native format, frame rate or bitrate on other models. Successful installation must be followed by separate checks of preview, look selection, JPEG persistence, recording start/stop, saved-video playback and color reset after exit. Actual colors may differ across models. Reports should identify model, firmware, app version and exactly what was tested.
 
 ## Download and installation
 
@@ -33,7 +34,7 @@ Candidates come from the [upstream model list](https://github.com/bonyback1/sony
 
 Download `FilmStudio-0.2.0-alpha-movie.apk`, then follow the [English installation guide](docs/INSTALL.en.md) to connect and install. No local compilation is required. **Code → Download ZIP contains source, not the installer.**
 
-This is an unofficial experimental release with only the a5100 evidence described above. The APK contains Sony base-app material and parameters fitted from publicly available Fujifilm LUTs. A separate grant to adapt and redistribute those third-party materials has not been established. Publication does not represent Sony/FUJIFILM permission or guarantee immunity; [license scope](LICENSING.md) distinguishes the rights in each part. Original official LUT files and signing private keys are not distributed.
+This is an unofficial experimental release. **A6000 installation, startup and real-time look changes have been verified in this repository**; the more extensive A5100 history comes from the upstream original project. The APK contains Sony base-app material and parameters fitted from publicly available Fujifilm LUTs. A separate grant to adapt and redistribute those third-party materials has not been established. Publication does not represent Sony/FUJIFILM permission or guarantee immunity; [license scope](LICENSING.md) distinguishes the rights in each part. Original official LUT files and signing private keys are not distributed.
 
 → **[Complete English installation guide](docs/INSTALL.en.md)**: inputs → local build → first-time connection → Wi-Fi ADB installation → camera controls → updates and troubleshooting.
 
@@ -67,7 +68,7 @@ For portraits, compare 30% and 50% first. Strength reduces both the color matrix
 
 ## Evidence and limits
 
-Tested on one **a5100, firmware 1.10, Android 2.3.7 / API 10**. Other models are not promised to work.
+This repository has verified installation, startup and real-time look changes on a **Sony a6000 / ILCE-6000**. The detailed 0.1.x save/video records below come from the upstream original project's tests on **a5100, firmware 1.10, Android 2.3.7 / API 10**. Other models are not promised to work unless explicitly documented.
 
 - 0.1.1: all ten look selections applied; PROVIA color and ACROS monochrome JPEGs saved; an ACROS XAVC S 1080p59.94 clip saved and fully decoded.
 - 0.1.2: the user confirmed format/quality menus were usable. Every encoded format has not been inspected.
@@ -75,7 +76,7 @@ Tested on one **a5100, firmware 1.10, Android 2.3.7 / API 10**. Other models are
 
 **In-app playback currently lists photographs only.** Exit to native playback and choose the appropriate XAVC S, AVCHD or MP4 view to see movies. See [validation notes](docs/VALIDATION.md).
 
-This is not a complete port of Fujifilm's in-camera Film Simulation. F-Log2/F-Gamut LUTs cannot be applied directly to ordinary Sony imagery. The fitting process uses WDR-709 as a proxy neutral reference, producing a 3×3 matrix and a common 1024-point curve. The a5100 has not been color-calibrated for this model; grain and sensor response are not simulated, and some looks have substantial approximation error.
+This is not a complete port of Fujifilm's in-camera Film Simulation. F-Log2/F-Gamut LUTs cannot be applied directly to ordinary Sony imagery. The fitting process uses WDR-709 as a proxy neutral reference, producing a 3×3 matrix and a common 1024-point curve. The a6000 has not yet received a complete camera-specific color calibration; grain and sensor response are not simulated, and some looks have substantial approximation error.
 
 ## License, ownership and sources
 
