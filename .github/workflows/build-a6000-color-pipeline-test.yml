@@ -1,0 +1,78 @@
+name: Build A6000 Color Pipeline Test
+
+on:
+  push:
+    branches:
+      - build/color-pipeline-test-20260930
+    paths:
+      - 'tools/a6000-color-pipeline-test/**'
+      - '.github/workflows/build-a6000-color-pipeline-test.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Locate Android SDK
+        shell: bash
+        run: |
+          set -eux
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          BT="$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          PLATFORM="$(find "$ANDROID_HOME/platforms" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)"
+          echo "BT=$BT" >> "$GITHUB_ENV"
+          echo "ANDROID_JAR=$PLATFORM/android.jar" >> "$GITHUB_ENV"
+          "$BT/aapt" version
+          "$BT/d8" --version
+
+      - name: Compile APK
+        shell: bash
+        working-directory: tools/a6000-color-pipeline-test
+        run: |
+          set -euxo pipefail
+          rm -rf classes out
+          mkdir -p classes out
+
+          javac -source 7 -target 7 -Xlint:-options \
+            -bootclasspath "$ANDROID_JAR" \
+            -d classes \
+            src/com/sonylut/colortest/MainActivity.java
+
+          "$BT/d8" --min-api 10 --output out $(find classes -name '*.class' -print)
+
+          "$BT/aapt" package -f \
+            -M AndroidManifest.xml \
+            -I "$ANDROID_JAR" \
+            -F out/A6000_ColorPipeline_Test-unsigned.apk
+
+          (cd out && zip -q A6000_ColorPipeline_Test-unsigned.apk classes.dex)
+
+      - name: Legacy v1 sign
+        shell: bash
+        working-directory: tools/a6000-color-pipeline-test
+        run: |
+          set -euxo pipefail
+          keytool -genkeypair -alias colortest -keyalg RSA -keysize 2048 -validity 10000 \
+            -keystore out/debug.keystore -storepass android -keypass android \
+            -dname "CN=A6000ColorTest,O=Community,C=US"
+
+          printf 'jdk.jar.disabledAlgorithms=\n' > out/legacy.properties
+          cp out/A6000_ColorPipeline_Test-unsigned.apk out/A6000_ColorPipeline_Test.apk
+          jarsigner -J-Djava.security.properties=out/legacy.properties \
+            -keystore out/debug.keystore -storepass android -keypass android \
+            -sigalg SHA1withRSA -digestalg SHA1 \
+            out/A6000_ColorPipeline_Test.apk colortest
+
+          sha256sum out/A6000_ColorPipeline_Test*.apk | tee out/SHA256SUMS.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: A6000_ColorPipeline_Test
+          path: |
+            tools/a6000-color-pipeline-test/out/A6000_ColorPipeline_Test.apk
+            tools/a6000-color-pipeline-test/out/A6000_ColorPipeline_Test-unsigned.apk
+            tools/a6000-color-pipeline-test/out/SHA256SUMS.txt
+          if-no-files-found: error
