@@ -420,14 +420,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         final int captureStep = step;
         final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
         try {
-            File dst = new File(sessionDir, base+".JPG");
-            copyFile(src, dst);
-            appendLog("CAPTURE OK "+base+" native="+src.getAbsolutePath()
-                    +" copy="+dst.getAbsolutePath()+" bytes="+dst.length());
-            refresh("CAPTURE OK: "+dst.getName()+"\nNative: "+src.getName());
+            File dst = new File(src.getParentFile(), base+".JPG");
+            if (dst.exists() && !dst.delete())
+                throw new RuntimeException("cannot replace existing "+dst.getAbsolutePath());
+
+            boolean renamed = src.renameTo(dst);
+            if (!renamed) {
+                copyFile(src, dst);
+                if (!src.delete())
+                    appendLog("WARN source delete failed "+src.getAbsolutePath());
+            }
+
+            appendLog("CAPTURE OK "+base+" final="+dst.getAbsolutePath()+" bytes="+dst.length()
+                    +" rename="+renamed);
+            refresh("CAPTURE OK: "+dst.getName()+"\nSaved in Sony DCIM folder");
         } catch (Throwable t) {
             taking = false;
-            failStop("COPY FAILED "+base, t);
+            failStop("RENAME FAILED "+base, t);
             return;
         }
 
@@ -439,25 +448,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             handler.postDelayed(new Runnable() {
                 public void run() { runCurrentStep(); }
             }, BETWEEN_SHOTS_MS);
-        }
-    }
-
-    private void chooseWritableOutputDir() {
-        if (sessionDir == null) return;
-        try {
-            if (!sessionDir.exists() && !sessionDir.mkdirs())
-                throw new RuntimeException("mkdir failed: "+sessionDir);
-            File probe = new File(sessionDir, ".write_test");
-            FileOutputStream os = new FileOutputStream(probe);
-            os.write(1);
-            os.close();
-            probe.delete();
-            appendLog("OUTPUT DIR OK "+sessionDir.getAbsolutePath());
-        } catch (Throwable t) {
-            File fallbackRoot = new File(Environment.getExternalStorageDirectory(), "LUTS/COLORTEST");
-            sessionDir = new File(fallbackRoot, sessionName);
-            sessionDir.mkdirs();
-            appendLog("OUTPUT DIR FALLBACK "+sessionDir.getAbsolutePath()+" because "+stack(t));
         }
     }
 
@@ -697,7 +687,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+"_"+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+".JPG";
-        overlay.setText("A6000 COLOR PIPELINE TEST  v0.2 AUTO\n"
+        overlay.setText("A6000 COLOR PIPELINE TEST  v0.4 AUTO\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Photo: "+expected+"\n"
