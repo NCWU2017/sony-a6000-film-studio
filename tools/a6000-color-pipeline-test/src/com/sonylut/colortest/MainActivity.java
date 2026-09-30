@@ -20,291 +20,222 @@ import java.io.FileOutputStream;
 import java.lang.reflect.Method;
 import java.util.Arrays;
 
-/**
- * A6000 SelectedColor revision capability/readback probe.
- *
- * No photo capture. The probe only:
- *  - reads supported modes and current mode
- *  - tries off / extract / revision
- *  - reads mode back through both ParametersModifier and raw Camera.Parameters
- *  - restores the original mode
- *
- * Results are displayed on screen and best-effort written to:
- *   /DCIM/SC_REVISION_PROBE.TXT
- *   /LUTS/SC_REVISION_PROBE.TXT
- */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
-    private static final String TAG = "SCRevisionProbe";
-    private static final int SCAN_MENU = 514;
-    private static final int SCAN_DELETE = 595;
-
-    private final Handler handler = new Handler();
+    private static final String TAG="SCRevisionProbe";
+    private static final int SCAN_MENU=514, SCAN_DELETE=595;
+    private final Handler handler=new Handler();
     private SurfaceHolder holder;
     private TextView overlay;
     private Object cameraEx;
     private Camera normal;
-    private boolean previewStarted;
-    private boolean started;
-    private String originalMode = "off";
-    private int maxChannels = 0;
-    private StringBuilder report = new StringBuilder();
+    private boolean previewStarted, started;
+    private String originalMode="off";
+    private int maxChannels=0;
+    private String supported0="?";
+    private String offResult="?", extractResult="?", revisionResult="?";
+    private String revisionRaw="?";
+    private String revisionErr="";
+    private String writeStatus="";
+    private StringBuilder full=new StringBuilder();
 
-    @Override public void onCreate(Bundle b) {
+    @Override public void onCreate(Bundle b){
         super.onCreate(b);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
-        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
-                WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,WindowManager.LayoutParams.FLAG_FULLSCREEN);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-        FrameLayout root = new FrameLayout(this);
-        SurfaceView sv = new SurfaceView(this);
-        holder = sv.getHolder();
-        holder.setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS);
-        holder.addCallback(this);
-        root.addView(sv, new FrameLayout.LayoutParams(-1, -1));
-
-        overlay = new TextView(this);
-        overlay.setTextColor(0xffffffff);
-        overlay.setBackgroundColor(0xcc000000);
-        overlay.setTextSize(15);
-        overlay.setGravity(Gravity.LEFT | Gravity.TOP);
-        overlay.setPadding(10, 8, 10, 8);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2);
-        lp.gravity = Gravity.TOP;
-        root.addView(overlay, lp);
+        FrameLayout root=new FrameLayout(this);
+        SurfaceView sv=new SurfaceView(this);
+        holder=sv.getHolder(); holder.setType(SurfaceHolder.SURFACE_TYPE_PUSH_BUFFERS); holder.addCallback(this);
+        root.addView(sv,new FrameLayout.LayoutParams(-1,-1));
+        overlay=new TextView(this);
+        overlay.setTextColor(0xffffffff); overlay.setBackgroundColor(0xdd000000);
+        overlay.setTextSize(18); overlay.setGravity(Gravity.LEFT|Gravity.TOP); overlay.setPadding(12,8,12,8);
+        root.addView(overlay,new FrameLayout.LayoutParams(-1,-1));
         setContentView(root);
-
-        setText("Opening CameraEx...");
+        render("Opening CameraEx...");
         openCamera();
     }
 
-    private void openCamera() {
-        try {
-            Class<?> cx = Class.forName("com.sony.scalar.hardware.CameraEx");
-            Method open = null;
-            Method[] ms = cx.getMethods();
-            for (int i=0;i<ms.length;i++) {
-                if ("open".equals(ms[i].getName()) && ms[i].getParameterTypes().length==2) {
-                    open = ms[i]; break;
-                }
-            }
-            if (open == null) throw new NoSuchMethodException("CameraEx.open");
-            cameraEx = open.invoke(null, new Object[]{Integer.valueOf(0), null});
-            normal = (Camera) call(cameraEx, "getNormalCamera", new Class[0], new Object[0]);
-            startPreviewIfReady();
-            maybeStart();
-        } catch(Throwable t) {
-            add("OPEN ERROR: "+rootCause(t));
-            finishReport();
-        }
+    private void openCamera(){
+        try{
+            Class<?> cx=Class.forName("com.sony.scalar.hardware.CameraEx");
+            Method open=null;
+            for(Method m:cx.getMethods()) if("open".equals(m.getName())&&m.getParameterTypes().length==2){open=m;break;}
+            if(open==null) throw new NoSuchMethodException("CameraEx.open");
+            cameraEx=open.invoke(null,new Object[]{Integer.valueOf(0),null});
+            normal=(Camera)call(cameraEx,"getNormalCamera",new Class[0],new Object[0]);
+            startPreviewIfReady(); maybeStart();
+        }catch(Throwable t){ revisionErr="OPEN "+rootCause(t); finishProbe(); }
     }
 
-    private Object modifier(Camera.Parameters p) throws Exception {
-        return call(cameraEx, "createParametersModifier",
-                new Class[]{Camera.Parameters.class}, new Object[]{p});
+    private Object modifier(Camera.Parameters p)throws Exception{
+        return call(cameraEx,"createParametersModifier",new Class[]{Camera.Parameters.class},new Object[]{p});
     }
 
-    private void maybeStart() {
-        if (started || normal==null || !previewStarted) return;
-        started = true;
-        handler.postDelayed(new Runnable() {
-            public void run() { runProbe(); }
-        }, 900);
+    private void maybeStart(){
+        if(started||normal==null||!previewStarted)return;
+        started=true;
+        handler.postDelayed(new Runnable(){public void run(){runProbe();}},700);
     }
 
-    private void runProbe() {
-        try {
-            add("=== A6000 SelectedColor revision probe v0.7 ===");
+    private void runProbe(){
+        try{
+            Camera.Parameters p0=normal.getParameters();
+            Object m0=modifier(p0);
+            Object sup=call(m0,"getSupportedColorSelectModes",new Class[0],new Object[0]);
+            supported0=formatAny(sup);
+            originalMode=String.valueOf(call(m0,"getColorSelectMode",new Class[0],new Object[0]));
+            maxChannels=((Integer)call(m0,"getMaxColorSelectChannels",new Class[0],new Object[0])).intValue();
+            log("SUPPORTED="+supported0);
+            log("ORIGINAL="+originalMode+" MAX_CH="+maxChannels);
 
-            Camera.Parameters p0 = normal.getParameters();
-            Object m0 = modifier(p0);
-
-            Object supported = call(m0, "getSupportedColorSelectModes", new Class[0], new Object[0]);
-            originalMode = String.valueOf(call(m0, "getColorSelectMode", new Class[0], new Object[0]));
-            maxChannels = ((Integer)call(m0, "getMaxColorSelectChannels", new Class[0], new Object[0])).intValue();
-
-            add("SUPPORTED="+formatAny(supported));
-            add("ORIGINAL_MODE="+originalMode);
-            add("MAX_CHANNELS="+maxChannels);
-            dumpRaw("BASE", p0);
-
-            testMode("off", new int[0]);
-            testMode("extract", maxChannels>0 ? new int[]{0} : new int[0]);
-            testMode("revision", maxChannels>0 ? new int[]{0} : new int[0]);
+            offResult=testMode("off",new int[0],false);
+            extractResult=testMode("extract",maxChannels>0?new int[]{0}:new int[0],false);
+            revisionResult=testMode("revision",maxChannels>0?new int[]{0}:new int[0],true);
 
             restoreOriginal();
-
-            Camera.Parameters pr = normal.getParameters();
-            Object mr = modifier(pr);
-            add("RESTORED_MODE="+String.valueOf(call(mr, "getColorSelectMode", new Class[0], new Object[0])));
-            dumpRaw("RESTORED", pr);
-            add("=== COMPLETE ===");
-        } catch(Throwable t) {
-            add("PROBE ERROR: "+rootCause(t));
-            try { restoreOriginal(); } catch(Throwable ignored) {}
+        }catch(Throwable t){
+            revisionErr="PROBE "+rootCause(t);
+            try{restoreOriginal();}catch(Throwable ignored){}
         }
-
-        finishReport();
+        finishProbe();
     }
 
-    private void testMode(String mode, int[] channels) {
-        add("");
-        add("--- TRY "+mode+" channels="+Arrays.toString(channels)+" ---");
-        try {
-            Camera.Parameters p = normal.getParameters();
-            Object mod = modifier(p);
-            call(mod, "setColorSelectMode",
-                    new Class[]{String.class, int[].class},
-                    new Object[]{mode, channels});
-            add("SETTER_CALL=OK");
+    private String testMode(String mode,int[] channels,boolean captureRevision){
+        String result="?";
+        try{
+            Camera.Parameters p=normal.getParameters();
+            Object mod=modifier(p);
+            call(mod,"setColorSelectMode",new Class[]{String.class,int[].class},new Object[]{mode,channels});
             normal.setParameters(p);
-            add("Camera.setParameters=OK");
-        } catch(Throwable t) {
-            add("SET_ERROR="+rootCause(t));
+            try{Thread.sleep(250);}catch(InterruptedException ignored){}
+            Camera.Parameters after=normal.getParameters();
+            Object ma=modifier(after);
+            result=String.valueOf(call(ma,"getColorSelectMode",new Class[0],new Object[0]));
+            String raw=null;
+            try{raw=after.get("color-select-mode");}catch(Throwable ignored){}
+            String vals=null;
+            try{vals=after.get("color-select-mode-values");}catch(Throwable ignored){}
+            log(mode+": readback="+result+" raw="+raw+" values="+vals);
+            if(captureRevision) revisionRaw=String.valueOf(raw)+" / values="+String.valueOf(vals);
+        }catch(Throwable t){
+            String e=rootCause(t);
+            log(mode+": ERROR "+e);
+            if(captureRevision) revisionErr=e;
+            result="ERROR";
         }
-
-        try { Thread.sleep(350); } catch(InterruptedException ignored) {}
-
-        try {
-            Camera.Parameters after = normal.getParameters();
-            Object modAfter = modifier(after);
-            Object rb = call(modAfter, "getColorSelectMode", new Class[0], new Object[0]);
-            Object sup = call(modAfter, "getSupportedColorSelectModes", new Class[0], new Object[0]);
-            add("READBACK_MODE="+String.valueOf(rb));
-            add("SUPPORTED_AFTER="+formatAny(sup));
-            dumpRaw(mode.toUpperCase(), after);
-        } catch(Throwable t) {
-            add("READBACK_ERROR="+rootCause(t));
-        }
+        return result;
     }
 
-    private void dumpRaw(String tag, Camera.Parameters p) {
-        String[] keys = new String[]{
-            "color-select-mode",
-            "color-select-mode-values",
-            "color-select-max-channels",
-            "color-select-channels",
-            "color-select-channel",
-            "color-select-supported"
+    private void finishProbe(){
+        writeStatus=writeEverywhere();
+        render(summary());
+    }
+
+    private String summary(){
+        StringBuilder s=new StringBuilder();
+        s.append("A6000 SC revision probe v0.8\n\n");
+        s.append("SUPPORTED: ").append(supported0).append("\n");
+        s.append("ORIGINAL: ").append(originalMode).append("\n");
+        s.append("MAX CH: ").append(maxChannels).append("\n\n");
+        s.append("OFF -> ").append(offResult).append("\n");
+        s.append("EXTRACT -> ").append(extractResult).append("\n");
+        s.append("REVISION -> ").append(revisionResult).append("\n");
+        s.append("REV RAW: ").append(revisionRaw).append("\n");
+        if(revisionErr.length()>0) s.append("REV ERR: ").append(revisionErr).append("\n");
+        s.append("\n").append(writeStatus).append("\n");
+        s.append("MENU: restore+exit");
+        return s.toString();
+    }
+
+    private String writeEverywhere(){
+        File root=Environment.getExternalStorageDirectory();
+        String text=full.toString()+"\n--- SUMMARY ---\n"+summaryNoWrite();
+        StringBuilder st=new StringBuilder("FILE:");
+        File[] fs=new File[]{
+            new File(root,"SCREV.TXT"),
+            new File(new File(root,"DCIM"),"SCREV.TXT"),
+            new File(new File(root,"LUTS"),"SCREV.TXT")
         };
-        for(int i=0;i<keys.length;i++) {
-            String v=null;
-            try { v=p.get(keys[i]); } catch(Throwable ignored) {}
-            add(tag+"_RAW["+keys[i]+"]="+String.valueOf(v));
+        for(int i=0;i<fs.length;i++){
+            try{
+                File parent=fs[i].getParentFile(); if(parent!=null&&!parent.exists()) parent.mkdirs();
+                FileOutputStream os=new FileOutputStream(fs[i],false);
+                os.write(text.getBytes("UTF-8")); os.close();
+                st.append(" ").append(fs[i].getAbsolutePath()).append("=OK");
+            }catch(Throwable t){ st.append(" ").append(fs[i].getAbsolutePath()).append("=FAIL"); }
         }
+        return st.toString();
     }
 
-    private void restoreOriginal() throws Exception {
-        if (normal==null) return;
+    private String summaryNoWrite(){
+        return "SUPPORTED="+supported0+"\nORIGINAL="+originalMode+"\nMAX_CH="+maxChannels+
+                "\nOFF="+offResult+"\nEXTRACT="+extractResult+"\nREVISION="+revisionResult+
+                "\nREV_RAW="+revisionRaw+"\nREV_ERR="+revisionErr+"\n";
+    }
+
+    private void restoreOriginal()throws Exception{
+        if(normal==null)return;
         Camera.Parameters p=normal.getParameters();
         Object mod=modifier(p);
         int[] channels;
-        if ("off".equals(originalMode)) {
-            channels=new int[0];
-        } else {
-            int n=Math.max(0, Math.min(maxChannels, 2));
-            channels=new int[n];
+        if("off".equals(originalMode)) channels=new int[0];
+        else{
+            int n=Math.max(0,Math.min(maxChannels,2)); channels=new int[n];
             for(int i=0;i<n;i++) channels[i]=i;
         }
-        call(mod, "setColorSelectMode",
-                new Class[]{String.class, int[].class},
-                new Object[]{originalMode,channels});
+        call(mod,"setColorSelectMode",new Class[]{String.class,int[].class},new Object[]{originalMode,channels});
         normal.setParameters(p);
     }
 
-    private static String formatAny(Object o) {
-        if (o==null) return "null";
-        if (o instanceof String[]) return Arrays.toString((String[])o);
-        if (o instanceof int[]) return Arrays.toString((int[])o);
-        if (o instanceof Object[]) return Arrays.toString((Object[])o);
+    private void log(String s){ full.append(s).append('\n'); Log.i(TAG,s); }
+
+    private static String formatAny(Object o){
+        if(o==null)return "null";
+        if(o instanceof String[])return Arrays.toString((String[])o);
+        if(o instanceof int[])return Arrays.toString((int[])o);
+        if(o instanceof Object[])return Arrays.toString((Object[])o);
         return String.valueOf(o);
     }
 
-    private void add(String s) {
-        report.append(s).append('\n');
-        Log.i(TAG,s);
-        setText(report.toString());
+    private void render(String s){ if(overlay!=null) overlay.setText(s); }
+
+    @Override public void surfaceCreated(SurfaceHolder h){startPreviewIfReady();maybeStart();}
+    @Override public void surfaceChanged(SurfaceHolder h,int f,int w,int he){}
+    @Override public void surfaceDestroyed(SurfaceHolder h){previewStarted=false;}
+
+    private void startPreviewIfReady(){
+        if(normal==null||previewStarted||holder==null)return;
+        try{normal.setPreviewDisplay(holder);normal.startPreview();previewStarted=true;}
+        catch(Throwable t){revisionErr="PREVIEW "+rootCause(t);finishProbe();}
     }
 
-    private void finishReport() {
-        writeReport(new File(new File(Environment.getExternalStorageDirectory(),"DCIM"),
-                "SC_REVISION_PROBE.TXT"));
-        File lut=new File(Environment.getExternalStorageDirectory(),"LUTS");
-        if(!lut.exists()) lut.mkdirs();
-        writeReport(new File(lut,"SC_REVISION_PROBE.TXT"));
-        setText(report.toString()+"\nMENU to exit.");
-    }
-
-    private void writeReport(File f) {
-        try {
-            FileOutputStream os=new FileOutputStream(f,false);
-            os.write(report.toString().getBytes("UTF-8"));
-            os.close();
-            Log.i(TAG,"WROTE "+f.getAbsolutePath());
-        } catch(Throwable t) {
-            Log.e(TAG,"write report failed "+f,t);
-        }
-    }
-
-    private void setText(final String s) {
-        if(overlay==null) return;
-        overlay.setText(s);
-    }
-
-    @Override public void surfaceCreated(SurfaceHolder h) {
-        startPreviewIfReady();
-        maybeStart();
-    }
-    @Override public void surfaceChanged(SurfaceHolder h,int f,int w,int he) {}
-    @Override public void surfaceDestroyed(SurfaceHolder h) { previewStarted=false; }
-
-    private void startPreviewIfReady() {
-        if(normal==null || previewStarted || holder==null) return;
-        try {
-            normal.setPreviewDisplay(holder);
-            normal.startPreview();
-            previewStarted=true;
-        } catch(Throwable t) {
-            add("PREVIEW ERROR: "+rootCause(t));
-            finishReport();
-        }
-    }
-
-    @Override public boolean onKeyDown(int keyCode, KeyEvent e) {
+    @Override public boolean onKeyDown(int keyCode,KeyEvent e){
         int scan=e.getScanCode();
-        if(scan==SCAN_MENU || scan==SCAN_DELETE || keyCode==KeyEvent.KEYCODE_MENU ||
-                keyCode==KeyEvent.KEYCODE_DEL) {
-            try { restoreOriginal(); } catch(Throwable ignored) {}
-            releaseCamera();
-            finish();
-            return true;
+        if(scan==SCAN_MENU||scan==SCAN_DELETE||keyCode==KeyEvent.KEYCODE_MENU||keyCode==KeyEvent.KEYCODE_DEL){
+            try{restoreOriginal();}catch(Throwable ignored){}
+            releaseCamera();finish();return true;
         }
         return true;
     }
-    @Override public boolean onKeyUp(int keyCode,KeyEvent e) { return true; }
+    @Override public boolean onKeyUp(int keyCode,KeyEvent e){return true;}
 
-    private void releaseCamera() {
-        try { if(normal!=null && previewStarted) normal.stopPreview(); } catch(Throwable ignored) {}
-        try { if(cameraEx!=null) call(cameraEx,"release",new Class[0],new Object[0]); } catch(Throwable ignored) {}
-        normal=null; cameraEx=null; previewStarted=false;
+    private void releaseCamera(){
+        try{if(normal!=null&&previewStarted)normal.stopPreview();}catch(Throwable ignored){}
+        try{if(cameraEx!=null)call(cameraEx,"release",new Class[0],new Object[0]);}catch(Throwable ignored){}
+        normal=null;cameraEx=null;previewStarted=false;
     }
 
-    @Override protected void onPause() {
+    @Override protected void onPause(){
         super.onPause();
-        if(isFinishing()) {
-            try { restoreOriginal(); } catch(Throwable ignored) {}
-            releaseCamera();
-        }
+        if(isFinishing()){try{restoreOriginal();}catch(Throwable ignored){} releaseCamera();}
     }
 
-    private static Object call(Object o,String n,Class[] types,Object[] args) throws Exception {
-        Method m=o.getClass().getMethod(n,types);
-        return m.invoke(o,args);
+    private static Object call(Object o,String n,Class[] types,Object[] args)throws Exception{
+        Method m=o.getClass().getMethod(n,types); return m.invoke(o,args);
     }
-
-    private static String rootCause(Throwable t) {
-        Throwable c=t;
-        while(c.getCause()!=null) c=c.getCause();
+    private static String rootCause(Throwable t){
+        Throwable c=t; while(c.getCause()!=null)c=c.getCause();
         return c.getClass().getSimpleName()+": "+String.valueOf(c.getMessage());
     }
 }
