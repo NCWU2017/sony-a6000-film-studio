@@ -37,8 +37,8 @@ import java.util.Set;
  * wait for ISP settle -> capture -> restart preview -> next test.
  *
  * Output:
- * /DCIM/COLORTEST/<session>/01_SAT_0.JPG ...
- * /LUTS/COLORTEST.LOG
+ * Sony native DSCxxxxx.JPG files are left untouched.
+ * /LUTS/COLORTEST.LOG and /LUTS/COLORTEST_MAP.csv are best-effort logs.
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "A6000ColorTest";
@@ -52,21 +52,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final long BETWEEN_SHOTS_MS = 1100;
 
     private static final String[] STEP_NAMES = new String[] {
-        "SAT_0",
+        "SAT_M16",
+        "SAT_M8",
         "SAT_M3",
+        "SAT_0",
         "SAT_P3",
-        "MTX_IDENTITY",
-        "MTX_G2R_64",
-        "MTX_R2B_64",
+        "SAT_P8",
+        "SAT_P16",
         "SC_OFF",
-        "SC_CH0_RED_BASE",
-        "SC_CH0_SAT_0",
-        "SC_CH0_SAT_63",
-        "SC_CH0_PHASE_M30",
-        "SC_CH0_PHASE_P30",
-        "SC_CH0_RANGE_1",
-        "SC_CH0_RANGE_63",
-        "SC_CH1_BLUE_SAT_63"
+        "SC_REV_CH0_RED",
+        "SC_REV_CH0_GREEN",
+        "SC_REV_CH0_BLUE",
+        "SC_EXT_CH0_RED",
+        "SC_EXT_CH0_GREEN",
+        "SC_EXT_CH0_BLUE",
+        "SC_REV_CH1_RED",
+        "SC_REV_CH1_BLUE"
     };
 
     private static final int[] MTX_ID = {
@@ -279,42 +280,40 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void applyStepOnly(int idx) throws Exception {
-        if (idx <= 2) {
-            int v = idx==0 ? 0 : (idx==1 ? -3 : 3);
-            v = Math.max(satMin, Math.min(satMax, v));
+        if (idx <= 6) {
+            int[] vals = new int[]{-16,-8,-3,0,3,8,16};
+            int v = Math.max(satMin, Math.min(satMax, vals[idx]));
             setSaturation(v);
-        } else if (idx == 3) {
-            setMatrix(MTX_ID);
-        } else if (idx == 4) {
-            setMatrix(MTX_G2R_64);
-        } else if (idx == 5) {
-            setMatrix(MTX_R2B_64);
-        } else if (idx == 6) {
-            setColorSelectOff();
-        } else {
-            if (maxColorSelectChannels < 1)
-                throw new IllegalStateException("getMaxColorSelectChannels="+maxColorSelectChannels);
-            if (idx == 14 && maxColorSelectChannels < 2)
-                throw new IllegalStateException("channel 1 unavailable, maxChannels="+maxColorSelectChannels);
-
-            Sel s;
-            int ch;
-            if (idx == 14) {
-                ch = 1;
-                s = blueRef();
-                s.saturation = 63;
-            } else {
-                ch = 0;
-                s = redRef();
-                if (idx == 8) s.saturation = 0;
-                if (idx == 9) s.saturation = 63;
-                if (idx == 10) s.phase = mod360(s.phase - 30);
-                if (idx == 11) s.phase = mod360(s.phase + 30);
-                if (idx == 12) s.range = 1;
-                if (idx == 13) s.range = 63;
-            }
-            setSelectedRevision(ch, s);
+            return;
         }
+
+        if (idx == 7) {
+            setColorSelectOff();
+            return;
+        }
+
+        if (maxColorSelectChannels < 1)
+            throw new IllegalStateException("getMaxColorSelectChannels="+maxColorSelectChannels);
+        if (idx >= 14 && maxColorSelectChannels < 2)
+            throw new IllegalStateException("channel 1 unavailable, maxChannels="+maxColorSelectChannels);
+
+        int ch = (idx >= 14) ? 1 : 0;
+        String mode = (idx >= 11 && idx <= 13) ? "extract" : "revision";
+        Sel color;
+
+        switch (idx) {
+            case 8:  color = redRef(); break;
+            case 9:  color = greenRef(); break;
+            case 10: color = blueRef(); break;
+            case 11: color = redRef(); break;
+            case 12: color = greenRef(); break;
+            case 13: color = blueRef(); break;
+            case 14: color = redRef(); break;
+            case 15: color = blueRef(); break;
+            default: throw new IllegalArgumentException("bad step "+idx);
+        }
+
+        setSelected(ch, mode, color);
     }
 
     private void isolateBase() throws Exception {
@@ -323,12 +322,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         Object mod = modifier(p);
 
         call(mod, "setSaturation", new Class[]{Integer.TYPE},
-                new Object[]{Integer.valueOf(originalSaturation)});
+                new Object[]{Integer.valueOf(Math.max(satMin, Math.min(satMax, 0)))});
 
-        if (originalMatrix != null && originalMatrix.length==9) {
-            call(mod, "setRGBMatrix", new Class[]{int[].class},
-                    new Object[]{originalMatrix.clone()});
-        }
+        call(mod, "setRGBMatrix", new Class[]{int[].class},
+                new Object[]{MTX_ID.clone()});
 
         call(mod, "setColorSelectMode", new Class[]{String.class, int[].class},
                 new Object[]{"off", new int[0]});
@@ -338,6 +335,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void captureCurrentStep() {
         if (!autoRunning || cameraEx == null || taking) return;
 
+        appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]
+                +" PRECAPTURE READBACK "+readback(step));
         taking = true;
         final int captureStep = step;
         final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
@@ -422,6 +421,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         // Do not rename, move, copy or modify Sony's native JPEG.
         // Record only the step <-> native filename/path relationship.
+        appendLog("STEP "+stepNo+" "+testName
+                +" POSTCAPTURE READBACK "+readback(captureStep));
         appendLog("MAP "+stepNo+" "+testName+" -> "
                 +src.getAbsolutePath()+" bytes="+src.length());
         appendMap(csv(sessionName)+","+stepNo+","+csv(testName)+","
@@ -568,11 +569,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         normal.setParameters(p);
     }
 
-    private void setSelectedRevision(int ch, Sel s) throws Exception {
+    private void setSelected(int ch, String mode, Sel s) throws Exception {
         Camera.Parameters p=normal.getParameters();
         Object mod=modifier(p);
         call(mod,"setColorSelectMode",new Class[]{String.class,int[].class},
-                new Object[]{"revision",new int[]{ch}});
+                new Object[]{mode,new int[]{ch}});
         normal.setParameters(p);
         writeSelected(ch,s);
     }
@@ -612,11 +613,24 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private Sel redRef() {
-        Sel s=new Sel(); s.phase=90; s.range=33; s.saturation=25; return s;
+        Sel s=new Sel();
+        s.phase=90; s.range=33; s.saturation=25;
+        s.y=0; s.cb=0; s.cr=0;
+        return s;
+    }
+
+    private Sel greenRef() {
+        Sel s=new Sel();
+        s.phase=230; s.range=63; s.saturation=2;
+        s.y=0; s.cb=0; s.cr=0;
+        return s;
     }
 
     private Sel blueRef() {
-        Sel s=new Sel(); s.phase=330; s.range=30; s.saturation=14; return s;
+        Sel s=new Sel();
+        s.phase=330; s.range=30; s.saturation=14;
+        s.y=0; s.cb=0; s.cr=0;
+        return s;
     }
 
     private String readback(int idx) {
@@ -624,8 +638,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         sb.append("Sat=").append(readSaturation());
         sb.append(" Matrix=").append(arr(readMatrix()));
         sb.append(" SCmode=").append(readColorSelectMode());
-        if (idx>=7) {
-            int ch=idx==14?1:0;
+        if (idx>=8) {
+            int ch=(idx>=14)?1:0;
             sb.append(" Ch").append(ch).append("=").append(readSelected(ch));
         }
         return sb.toString();
@@ -666,7 +680,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 COLOR PIPELINE TEST  v0.5 AUTO\n"
+        overlay.setText("A6000 COLOR PIPELINE TEST  v0.6 AUTO\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
