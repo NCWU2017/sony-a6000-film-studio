@@ -17,109 +17,37 @@ import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Proxy;
-import java.lang.reflect.InvocationHandler;
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.Locale;
-import java.util.HashSet;
-import java.util.Set;
+import java.util.Arrays;
 
 /**
- * Sony A6000 color-pipeline calibration probe — automatic sequence.
+ * A6000 SelectedColor revision capability/readback probe.
  *
- * Automatic flow:
- * open camera -> start preview -> autofocus once -> for each test:
- * reset common parameters -> write this test parameter -> readback ->
- * wait for ISP settle -> capture -> restart preview -> next test.
+ * No photo capture. The probe only:
+ *  - reads supported modes and current mode
+ *  - tries off / extract / revision
+ *  - reads mode back through both ParametersModifier and raw Camera.Parameters
+ *  - restores the original mode
  *
- * Output:
- * Sony native DSCxxxxx.JPG files are left untouched.
- * /LUTS/COLORTEST.LOG and /LUTS/COLORTEST_MAP.csv are best-effort logs.
+ * Results are displayed on screen and best-effort written to:
+ *   /DCIM/SC_REVISION_PROBE.TXT
+ *   /LUTS/SC_REVISION_PROBE.TXT
  */
 public class MainActivity extends Activity implements SurfaceHolder.Callback {
-    private static final String TAG = "A6000ColorTest";
+    private static final String TAG = "SCRevisionProbe";
     private static final int SCAN_MENU = 514;
     private static final int SCAN_DELETE = 595;
 
-    private static final long START_DELAY_MS = 1200;
-    private static final long AF_TIMEOUT_MS = 3500;
-    private static final long AFTER_AF_DELAY_MS = 500;
-    private static final long ISP_SETTLE_MS = 900;
-    private static final long BETWEEN_SHOTS_MS = 1100;
-
-    private static final String[] STEP_NAMES = new String[] {
-        "SAT_M16",
-        "SAT_M8",
-        "SAT_M3",
-        "SAT_0",
-        "SAT_P3",
-        "SAT_P8",
-        "SAT_P16",
-        "SC_OFF",
-        "SC_REV_CH0_RED",
-        "SC_REV_CH0_GREEN",
-        "SC_REV_CH0_BLUE",
-        "SC_EXT_CH0_RED",
-        "SC_EXT_CH0_GREEN",
-        "SC_EXT_CH0_BLUE",
-        "SC_REV_CH1_RED",
-        "SC_REV_CH1_BLUE"
-    };
-
-    private static final int[] MTX_ID = {
-        1024,0,0, 0,1024,0, 0,0,1024
-    };
-    private static final int[] MTX_G2R_64 = {
-        960,64,0, 0,1024,0, 0,0,1024
-    };
-    private static final int[] MTX_R2B_64 = {
-        1024,0,0, 0,1024,0, 64,0,960
-    };
-
     private final Handler handler = new Handler();
-
     private SurfaceHolder holder;
     private TextView overlay;
     private Object cameraEx;
     private Camera normal;
     private boolean previewStarted;
-    private boolean taking;
-    private boolean autoStarted;
-    private boolean autoRunning;
-    private boolean sequenceDone;
-    private boolean afFinished;
-    private int step;
-    private Object shutterProxy;
-    private Set<String> beforeCapturePaths = new HashSet<String>();
-    private File pendingNativeFile;
-    private long pendingNativeSize = -1;
-    private int pendingStableCount;
-    private int nativePollCount;
-
-    private int originalSaturation;
-    private int satMin = -3;
-    private int satMax = 3;
-    private int[] originalMatrix;
-    private String originalColorSelectMode = "off";
-    private int maxColorSelectChannels;
-    private Sel[] originalSelected;
-    private boolean backupReady;
-
-    private File logFile;
-    private File mapFile;
-    private File photoRoot;
-    private String sessionName;
-
-    private static class Sel {
-        int y, cb, cr, phase, range, saturation;
-        public String toString() {
-            return "Y="+y+",Cb="+cb+",Cr="+cr+",Phase="+phase+",Range="+range+",Saturation="+saturation;
-        }
-    }
+    private boolean started;
+    private String originalMode = "off";
+    private int maxChannels = 0;
+    private StringBuilder report = new StringBuilder();
 
     @Override public void onCreate(Bundle b) {
         super.onCreate(b);
@@ -137,28 +65,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         overlay = new TextView(this);
         overlay.setTextColor(0xffffffff);
-        overlay.setBackgroundColor(0x99000000);
-        overlay.setTextSize(16);
+        overlay.setBackgroundColor(0xcc000000);
+        overlay.setTextSize(15);
         overlay.setGravity(Gravity.LEFT | Gravity.TOP);
-        overlay.setPadding(12, 8, 12, 8);
+        overlay.setPadding(10, 8, 10, 8);
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2);
         lp.gravity = Gravity.TOP;
         root.addView(overlay, lp);
         setContentView(root);
 
-        File lutDir = new File(Environment.getExternalStorageDirectory(), "LUTS");
-        if (!lutDir.exists()) lutDir.mkdirs();
-        logFile = new File(lutDir, "COLORTEST.LOG");
-        mapFile = new File(lutDir, "COLORTEST_MAP.csv");
-        if (!mapFile.exists()) {
-            appendMap("session,step,test_name,native_filename,native_path,bytes");
-        }
-
-        photoRoot = new File(Environment.getExternalStorageDirectory(), "DCIM");
-        sessionName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-
-        appendLog("\n=== AUTO START "+now()+" session="+sessionName+" ===");
-        refresh("Opening CameraEx...");
+        setText("Opening CameraEx...");
         openCamera();
     }
 
@@ -175,12 +91,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             if (open == null) throw new NoSuchMethodException("CameraEx.open");
             cameraEx = open.invoke(null, new Object[]{Integer.valueOf(0), null});
             normal = (Camera) call(cameraEx, "getNormalCamera", new Class[0], new Object[0]);
-            installShutterListener();
-            backupOriginals();
             startPreviewIfReady();
-            maybeStartAuto();
-        } catch (Throwable t) {
-            failStop("OPEN ERROR", t);
+            maybeStart();
+        } catch(Throwable t) {
+            add("OPEN ERROR: "+rootCause(t));
+            finishReport();
         }
     }
 
@@ -189,548 +104,196 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 new Class[]{Camera.Parameters.class}, new Object[]{p});
     }
 
-    private void backupOriginals() {
-        try {
-            Camera.Parameters p = normal.getParameters();
-            Object mod = modifier(p);
-            originalSaturation = intCall(mod, "getSaturation", 0);
-            satMin = intCall(mod, "getMinSaturation", -3);
-            satMax = intCall(mod, "getMaxSaturation", 3);
-            originalMatrix = (int[]) call(mod, "getRGBMatrix", new Class[0], new Object[0]);
-            if (originalMatrix != null) originalMatrix = originalMatrix.clone();
-            Object m = safeCall(mod, "getColorSelectMode");
-            if (m != null) originalColorSelectMode = String.valueOf(m);
-            maxColorSelectChannels = intCall(mod, "getMaxColorSelectChannels", 0);
-            int n = Math.max(0, Math.min(maxColorSelectChannels, 8));
-            originalSelected = new Sel[n];
-            for (int i=0;i<n;i++) originalSelected[i] = readSelected(i);
-            backupReady = true;
-
-            appendLog("BACKUP saturation="+originalSaturation+" min="+satMin+" max="+satMax);
-            appendLog("BACKUP matrix="+arr(originalMatrix));
-            appendLog("BACKUP colorSelectMode="+originalColorSelectMode+" maxChannels="+maxColorSelectChannels);
-            for (int i=0;i<n;i++) appendLog("BACKUP channel"+i+"="+originalSelected[i]);
-        } catch (Throwable t) {
-            failStop("BACKUP ERROR", t);
-        }
-    }
-
-    private void maybeStartAuto() {
-        if (autoStarted || !backupReady || !previewStarted || normal == null) return;
-        autoStarted = true;
-        autoRunning = true;
-        refresh("Preview ready. Autofocus will start...");
+    private void maybeStart() {
+        if (started || normal==null || !previewStarted) return;
+        started = true;
         handler.postDelayed(new Runnable() {
-            public void run() { startInitialAutofocus(); }
-        }, START_DELAY_MS);
+            public void run() { runProbe(); }
+        }, 900);
     }
 
-    private void startInitialAutofocus() {
-        if (!autoRunning || normal == null) return;
-        afFinished = false;
-        refresh("AUTOFOCUS...");
-        appendLog("AF START");
+    private void runProbe() {
         try {
-            normal.autoFocus(new Camera.AutoFocusCallback() {
-                public void onAutoFocus(boolean success, Camera camera) {
-                    if (afFinished || !autoRunning) return;
-                    afFinished = true;
-                    appendLog("AF CALLBACK success="+success);
-                    refresh("AF "+(success ? "LOCK" : "DONE/UNCONFIRMED")+" -> start tests");
-                    handler.postDelayed(new Runnable() {
-                        public void run() { runCurrentStep(); }
-                    }, AFTER_AF_DELAY_MS);
-                }
-            });
-        } catch (Throwable t) {
-            appendLog("AF ERROR "+stack(t)+"; continue after timeout path");
-        }
+            add("=== A6000 SelectedColor revision probe v0.7 ===");
 
-        handler.postDelayed(new Runnable() {
-            public void run() {
-                if (!autoRunning || afFinished) return;
-                afFinished = true;
-                appendLog("AF TIMEOUT after "+AF_TIMEOUT_MS+"ms; continue");
-                refresh("AF TIMEOUT -> continue tests");
-                handler.postDelayed(new Runnable() {
-                    public void run() { runCurrentStep(); }
-                }, AFTER_AF_DELAY_MS);
-            }
-        }, AF_TIMEOUT_MS);
-    }
+            Camera.Parameters p0 = normal.getParameters();
+            Object m0 = modifier(p0);
 
-    private void runCurrentStep() {
-        if (!autoRunning || taking || normal == null) return;
-        try {
-            appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]+" RESET START");
-            isolateBase();
-            appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]+" RESET OK");
+            Object supported = call(m0, "getSupportedColorSelectModes", new Class[0], new Object[0]);
+            originalMode = String.valueOf(call(m0, "getColorSelectMode", new Class[0], new Object[0]));
+            maxChannels = ((Integer)call(m0, "getMaxColorSelectChannels", new Class[0], new Object[0])).intValue();
 
-            applyStepOnly(step);
-            String rb = readback(step);
-            appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]+" WRITE/READBACK OK "+rb);
-            refresh("RESET OK -> WRITE OK -> waiting ISP\n"+rb);
+            add("SUPPORTED="+formatAny(supported));
+            add("ORIGINAL_MODE="+originalMode);
+            add("MAX_CHANNELS="+maxChannels);
+            dumpRaw("BASE", p0);
 
-            handler.postDelayed(new Runnable() {
-                public void run() { captureCurrentStep(); }
-            }, ISP_SETTLE_MS);
-        } catch (Throwable t) {
-            failStop("STEP "+two(step+1)+" "+STEP_NAMES[step]+" APPLY ERROR", t);
-        }
-    }
+            testMode("off", new int[0]);
+            testMode("extract", maxChannels>0 ? new int[]{0} : new int[0]);
+            testMode("revision", maxChannels>0 ? new int[]{0} : new int[0]);
 
-    private void applyStepOnly(int idx) throws Exception {
-        if (idx <= 6) {
-            int[] vals = new int[]{-16,-8,-3,0,3,8,16};
-            int v = Math.max(satMin, Math.min(satMax, vals[idx]));
-            setSaturation(v);
-            return;
-        }
+            restoreOriginal();
 
-        if (idx == 7) {
-            setColorSelectOff();
-            return;
-        }
-
-        if (maxColorSelectChannels < 1)
-            throw new IllegalStateException("getMaxColorSelectChannels="+maxColorSelectChannels);
-        if (idx >= 14 && maxColorSelectChannels < 2)
-            throw new IllegalStateException("channel 1 unavailable, maxChannels="+maxColorSelectChannels);
-
-        int ch = (idx >= 14) ? 1 : 0;
-        String mode = (idx >= 11 && idx <= 13) ? "extract" : "revision";
-        Sel color;
-
-        switch (idx) {
-            case 8:  color = redRef(); break;
-            case 9:  color = greenRef(); break;
-            case 10: color = blueRef(); break;
-            case 11: color = redRef(); break;
-            case 12: color = greenRef(); break;
-            case 13: color = blueRef(); break;
-            case 14: color = redRef(); break;
-            case 15: color = blueRef(); break;
-            default: throw new IllegalArgumentException("bad step "+idx);
-        }
-
-        setSelected(ch, mode, color);
-    }
-
-    private void isolateBase() throws Exception {
-        if (!backupReady) throw new IllegalStateException("backup not ready");
-        Camera.Parameters p = normal.getParameters();
-        Object mod = modifier(p);
-
-        call(mod, "setSaturation", new Class[]{Integer.TYPE},
-                new Object[]{Integer.valueOf(Math.max(satMin, Math.min(satMax, 0)))});
-
-        call(mod, "setRGBMatrix", new Class[]{int[].class},
-                new Object[]{MTX_ID.clone()});
-
-        call(mod, "setColorSelectMode", new Class[]{String.class, int[].class},
-                new Object[]{"off", new int[0]});
-        normal.setParameters(p);
-    }
-
-    private void captureCurrentStep() {
-        if (!autoRunning || cameraEx == null || taking) return;
-
-        appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]
-                +" PRECAPTURE READBACK "+readback(step));
-        taking = true;
-        final int captureStep = step;
-        final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
-        beforeCapturePaths = collectJpegPaths(photoRoot);
-        pendingNativeFile = null;
-        pendingNativeSize = -1;
-        pendingStableCount = 0;
-        nativePollCount = 0;
-        appendLog("CAPTURE START "+base+" mode=CameraEx.burstableTakePicture");
-
-        try {
-            call(cameraEx, "burstableTakePicture", new Class[0], new Object[0]);
-            refresh("NATIVE CAPTURE TRIGGERED: "+base+"\nWaiting for Sony JPEG...");
-        } catch (Throwable t) {
-            taking = false;
-            failStop("NATIVE CAPTURE ERROR "+base, t);
-        }
-    }
-
-    private void installShutterListener() throws Exception {
-        final Class<?> iface = Class.forName("com.sony.scalar.hardware.CameraEx$ShutterListener");
-        shutterProxy = Proxy.newProxyInstance(iface.getClassLoader(), new Class[]{iface},
-                new InvocationHandler() {
-                    public Object invoke(Object proxy, Method method, Object[] args) {
-                        if ("onShutter".equals(method.getName())) {
-                            appendLog("SHUTTER CALLBACK");
-                            try {
-                                call(cameraEx, "cancelTakePicture", new Class[0], new Object[0]);
-                            } catch (Throwable t) {
-                                appendLog("cancelTakePicture ERROR "+stack(t));
-                            }
-                            handler.postDelayed(new Runnable() {
-                                public void run() { pollNativeJpeg(); }
-                            }, 700);
-                        }
-                        return null;
-                    }
-                });
-        call(cameraEx, "setShutterListener", new Class[]{iface}, new Object[]{shutterProxy});
-        appendLog("SHUTTER LISTENER OK");
-    }
-
-    private void pollNativeJpeg() {
-        if (!autoRunning || !taking) return;
-        nativePollCount++;
-        File f = findNewJpeg(photoRoot, beforeCapturePaths);
-        if (f != null) {
-            if (pendingNativeFile == null || !f.getAbsolutePath().equals(pendingNativeFile.getAbsolutePath())) {
-                pendingNativeFile = f;
-                pendingNativeSize = f.length();
-                pendingStableCount = 0;
-                appendLog("NEW JPEG FOUND "+f.getAbsolutePath()+" size="+pendingNativeSize);
-            } else {
-                long len = f.length();
-                if (len > 0 && len == pendingNativeSize) {
-                    pendingStableCount++;
-                } else {
-                    pendingStableCount = 0;
-                    pendingNativeSize = len;
-                }
-                if (pendingStableCount >= 2) {
-                    finishNativeCapture(f);
-                    return;
-                }
-            }
-        }
-        if (nativePollCount >= 20) {
-            taking = false;
-            failStop("CAPTURE FAILED "+two(step+1)+"_"+STEP_NAMES[step],
-                    new RuntimeException("Sony native JPEG not found/stable"));
-            return;
-        }
-        handler.postDelayed(new Runnable() {
-            public void run() { pollNativeJpeg(); }
-        }, 500);
-    }
-
-    private void finishNativeCapture(File src) {
-        final int captureStep = step;
-        final String stepNo = two(captureStep+1);
-        final String testName = STEP_NAMES[captureStep];
-
-        // Do not rename, move, copy or modify Sony's native JPEG.
-        // Record only the step <-> native filename/path relationship.
-        appendLog("STEP "+stepNo+" "+testName
-                +" POSTCAPTURE READBACK "+readback(captureStep));
-        appendLog("MAP "+stepNo+" "+testName+" -> "
-                +src.getAbsolutePath()+" bytes="+src.length());
-        appendMap(csv(sessionName)+","+stepNo+","+csv(testName)+","
-                +csv(src.getName())+","+csv(src.getAbsolutePath())+","+src.length());
-
-        refresh("CAPTURE OK\n"+stepNo+" "+testName+" -> "+src.getName()
-                +"\nMapping logged; native photo untouched.");
-
-        taking = false;
-        if (captureStep + 1 >= STEP_NAMES.length) {
-            finishSequence();
-        } else {
-            step = captureStep + 1;
-            handler.postDelayed(new Runnable() {
-                public void run() { runCurrentStep(); }
-            }, BETWEEN_SHOTS_MS);
-        }
-    }
-
-    private static Set<String> collectJpegPaths(File root) {
-        Set<String> out = new HashSet<String>();
-        collectJpegPathsRec(root, out, 0);
-        return out;
-    }
-
-    private static void collectJpegPathsRec(File f, Set<String> out, int depth) {
-        if (f == null || depth > 4) return;
-        File[] a = f.listFiles();
-        if (a == null) return;
-        for (int i=0;i<a.length;i++) {
-            File x=a[i];
-            if (x.isDirectory()) {
-                if (!"COLORTEST".equalsIgnoreCase(x.getName()))
-                    collectJpegPathsRec(x,out,depth+1);
-            } else {
-                String n=x.getName().toUpperCase(Locale.US);
-                if (n.endsWith(".JPG") || n.endsWith(".JPEG"))
-                    out.add(x.getAbsolutePath());
-            }
-        }
-    }
-
-    private static File findNewJpeg(File root, Set<String> before) {
-        return findNewJpegRec(root,before,0,null);
-    }
-
-    private static File findNewJpegRec(File f, Set<String> before, int depth, File best) {
-        if (f == null || depth > 4) return best;
-        File[] a=f.listFiles();
-        if (a == null) return best;
-        for (int i=0;i<a.length;i++) {
-            File x=a[i];
-            if (x.isDirectory()) {
-                if (!"COLORTEST".equalsIgnoreCase(x.getName()))
-                    best=findNewJpegRec(x,before,depth+1,best);
-            } else {
-                String n=x.getName().toUpperCase(Locale.US);
-                if ((n.endsWith(".JPG") || n.endsWith(".JPEG"))
-                        && !before.contains(x.getAbsolutePath())) {
-                    if (best==null || x.lastModified()>best.lastModified()
-                            || (x.lastModified()==best.lastModified() && x.length()>best.length()))
-                        best=x;
-                }
-            }
-        }
-        return best;
-    }
-
-    private void finishSequence() {
-        autoRunning = false;
-        sequenceDone = true;
-        appendLog("ALL "+STEP_NAMES.length+" TESTS COMPLETE");
-        restoreOriginals();
-        appendLog("=== AUTO COMPLETE "+now()+" session="+sessionName+" ===");
-        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nSony filenames untouched; mapping saved in /LUTS/COLORTEST_MAP.csv\nParameters restored. MENU to exit.");
-    }
-
-    private void restoreOriginals() {
-        if (!backupReady || normal == null) return;
-        try {
-            Camera.Parameters p = normal.getParameters();
-            Object mod = modifier(p);
-            call(mod, "setSaturation", new Class[]{Integer.TYPE},
-                    new Object[]{Integer.valueOf(originalSaturation)});
-            if (originalMatrix != null && originalMatrix.length==9) {
-                call(mod, "setRGBMatrix", new Class[]{int[].class},
-                        new Object[]{originalMatrix.clone()});
-            }
-
-            if ("off".equals(originalColorSelectMode)) {
-                call(mod, "setColorSelectMode", new Class[]{String.class,int[].class},
-                        new Object[]{"off",new int[0]});
-            } else {
-                int n = originalSelected == null ? 0 : originalSelected.length;
-                int[] enabled = new int[n];
-                for (int i=0;i<n;i++) enabled[i]=i;
-                call(mod, "setColorSelectMode", new Class[]{String.class,int[].class},
-                        new Object[]{originalColorSelectMode,enabled});
-            }
-            normal.setParameters(p);
-
-            if (originalSelected != null && !"off".equals(originalColorSelectMode)) {
-                for (int i=0;i<originalSelected.length;i++) {
-                    if (originalSelected[i] != null) writeSelected(i, originalSelected[i]);
-                }
-            }
-            appendLog("RESTORE OK saturation="+readSaturation()+" matrix="+arr(readMatrix())
-                    +" mode="+readColorSelectMode());
-        } catch (Throwable t) {
-            appendLog("RESTORE ERROR "+stack(t));
-        }
-    }
-
-    private void setSaturation(int v) throws Exception {
-        Camera.Parameters p=normal.getParameters();
-        Object mod=modifier(p);
-        call(mod,"setSaturation",new Class[]{Integer.TYPE},new Object[]{Integer.valueOf(v)});
-        normal.setParameters(p);
-    }
-
-    private int readSaturation() {
-        try { return intCall(modifier(normal.getParameters()),"getSaturation",999); }
-        catch(Throwable t) { return 999; }
-    }
-
-    private void setMatrix(int[] m) throws Exception {
-        Camera.Parameters p=normal.getParameters();
-        Object mod=modifier(p);
-        call(mod,"setRGBMatrix",new Class[]{int[].class},new Object[]{m.clone()});
-        normal.setParameters(p);
-    }
-
-    private int[] readMatrix() {
-        try {
-            return (int[])call(modifier(normal.getParameters()),"getRGBMatrix",new Class[0],new Object[0]);
-        } catch(Throwable t) { return null; }
-    }
-
-    private void setColorSelectOff() throws Exception {
-        Camera.Parameters p=normal.getParameters();
-        Object mod=modifier(p);
-        call(mod,"setColorSelectMode",new Class[]{String.class,int[].class},
-                new Object[]{"off",new int[0]});
-        normal.setParameters(p);
-    }
-
-    private void setSelected(int ch, String mode, Sel s) throws Exception {
-        Camera.Parameters p=normal.getParameters();
-        Object mod=modifier(p);
-        call(mod,"setColorSelectMode",new Class[]{String.class,int[].class},
-                new Object[]{mode,new int[]{ch}});
-        normal.setParameters(p);
-        writeSelected(ch,s);
-    }
-
-    private String readColorSelectMode() {
-        try {
-            Object x=call(modifier(normal.getParameters()),"getColorSelectMode",new Class[0],new Object[0]);
-            return String.valueOf(x);
-        } catch(Throwable t) { return "?"; }
-    }
-
-    private Sel readSelected(int ch) {
-        try {
-            Object o=call(cameraEx,"getChannelColorSelect",new Class[]{Integer.TYPE},
-                    new Object[]{Integer.valueOf(ch)});
-            if (o==null) return null;
-            Sel s=new Sel();
-            s.y=getFieldInt(o,"Y"); s.cb=getFieldInt(o,"Cb"); s.cr=getFieldInt(o,"Cr");
-            s.phase=getFieldInt(o,"Phase"); s.range=getFieldInt(o,"Range");
-            s.saturation=getFieldInt(o,"Saturation");
-            return s;
+            Camera.Parameters pr = normal.getParameters();
+            Object mr = modifier(pr);
+            add("RESTORED_MODE="+String.valueOf(call(mr, "getColorSelectMode", new Class[0], new Object[0])));
+            dumpRaw("RESTORED", pr);
+            add("=== COMPLETE ===");
         } catch(Throwable t) {
-            appendLog("readSelected ch="+ch+" ERROR "+t);
-            return null;
+            add("PROBE ERROR: "+rootCause(t));
+            try { restoreOriginal(); } catch(Throwable ignored) {}
+        }
+
+        finishReport();
+    }
+
+    private void testMode(String mode, int[] channels) {
+        add("");
+        add("--- TRY "+mode+" channels="+Arrays.toString(channels)+" ---");
+        try {
+            Camera.Parameters p = normal.getParameters();
+            Object mod = modifier(p);
+            call(mod, "setColorSelectMode",
+                    new Class[]{String.class, int[].class},
+                    new Object[]{mode, channels});
+            add("SETTER_CALL=OK");
+            normal.setParameters(p);
+            add("Camera.setParameters=OK");
+        } catch(Throwable t) {
+            add("SET_ERROR="+rootCause(t));
+        }
+
+        try { Thread.sleep(350); } catch(InterruptedException ignored) {}
+
+        try {
+            Camera.Parameters after = normal.getParameters();
+            Object modAfter = modifier(after);
+            Object rb = call(modAfter, "getColorSelectMode", new Class[0], new Object[0]);
+            Object sup = call(modAfter, "getSupportedColorSelectModes", new Class[0], new Object[0]);
+            add("READBACK_MODE="+String.valueOf(rb));
+            add("SUPPORTED_AFTER="+formatAny(sup));
+            dumpRaw(mode.toUpperCase(), after);
+        } catch(Throwable t) {
+            add("READBACK_ERROR="+rootCause(t));
         }
     }
 
-    private void writeSelected(int ch, Sel s) throws Exception {
-        Class<?> c=Class.forName("com.sony.scalar.hardware.CameraEx$SelectedColor");
-        Constructor<?> ctor=c.getConstructor(new Class[0]);
-        Object o=ctor.newInstance(new Object[0]);
-        setFieldInt(o,"Y",s.y); setFieldInt(o,"Cb",s.cb); setFieldInt(o,"Cr",s.cr);
-        setFieldInt(o,"Phase",s.phase); setFieldInt(o,"Range",s.range);
-        setFieldInt(o,"Saturation",s.saturation);
-        call(cameraEx,"setColorSelectToChannel",new Class[]{Integer.TYPE,c},
-                new Object[]{Integer.valueOf(ch),o});
-    }
-
-    private Sel redRef() {
-        Sel s=new Sel();
-        s.phase=90; s.range=33; s.saturation=25;
-        s.y=0; s.cb=0; s.cr=0;
-        return s;
-    }
-
-    private Sel greenRef() {
-        Sel s=new Sel();
-        s.phase=230; s.range=63; s.saturation=2;
-        s.y=0; s.cb=0; s.cr=0;
-        return s;
-    }
-
-    private Sel blueRef() {
-        Sel s=new Sel();
-        s.phase=330; s.range=30; s.saturation=14;
-        s.y=0; s.cb=0; s.cr=0;
-        return s;
-    }
-
-    private String readback(int idx) {
-        StringBuilder sb=new StringBuilder();
-        sb.append("Sat=").append(readSaturation());
-        sb.append(" Matrix=").append(arr(readMatrix()));
-        sb.append(" SCmode=").append(readColorSelectMode());
-        if (idx>=8) {
-            int ch=(idx>=14)?1:0;
-            sb.append(" Ch").append(ch).append("=").append(readSelected(ch));
+    private void dumpRaw(String tag, Camera.Parameters p) {
+        String[] keys = new String[]{
+            "color-select-mode",
+            "color-select-mode-values",
+            "color-select-max-channels",
+            "color-select-channels",
+            "color-select-channel",
+            "color-select-supported"
+        };
+        for(int i=0;i<keys.length;i++) {
+            String v=null;
+            try { v=p.get(keys[i]); } catch(Throwable ignored) {}
+            add(tag+"_RAW["+keys[i]+"]="+String.valueOf(v));
         }
-        return sb.toString();
     }
 
-    private void failStop(String where, Throwable t) {
-        autoRunning = false;
-        appendLog(where+" "+stack(t));
-        restoreOriginals();
-        refresh("STOPPED\n"+where+"\n"+stack(t)+"\nParameters restored. MENU to exit.");
-    }
-
-    @Override public boolean onKeyDown(int keyCode, KeyEvent e) {
-        int scan=e.getScanCode();
-        if (scan==SCAN_MENU || keyCode==KeyEvent.KEYCODE_MENU) {
-            autoRunning=false;
-            handler.removeCallbacksAndMessages(null);
-            restoreOriginals();
-            releaseCamera();
-            finish();
-            return true;
+    private void restoreOriginal() throws Exception {
+        if (normal==null) return;
+        Camera.Parameters p=normal.getParameters();
+        Object mod=modifier(p);
+        int[] channels;
+        if ("off".equals(originalMode)) {
+            channels=new int[0];
+        } else {
+            int n=Math.max(0, Math.min(maxChannels, 2));
+            channels=new int[n];
+            for(int i=0;i<n;i++) channels[i]=i;
         }
-        if (scan==SCAN_DELETE || keyCode==KeyEvent.KEYCODE_DEL) {
-            autoRunning=false;
-            handler.removeCallbacksAndMessages(null);
-            restoreOriginals();
-            refresh("AUTO STOPPED manually. Parameters restored. MENU to exit.");
-            return true;
+        call(mod, "setColorSelectMode",
+                new Class[]{String.class, int[].class},
+                new Object[]{originalMode,channels});
+        normal.setParameters(p);
+    }
+
+    private static String formatAny(Object o) {
+        if (o==null) return "null";
+        if (o instanceof String[]) return Arrays.toString((String[])o);
+        if (o instanceof int[]) return Arrays.toString((int[])o);
+        if (o instanceof Object[]) return Arrays.toString((Object[])o);
+        return String.valueOf(o);
+    }
+
+    private void add(String s) {
+        report.append(s).append('\n');
+        Log.i(TAG,s);
+        setText(report.toString());
+    }
+
+    private void finishReport() {
+        writeReport(new File(new File(Environment.getExternalStorageDirectory(),"DCIM"),
+                "SC_REVISION_PROBE.TXT"));
+        File lut=new File(Environment.getExternalStorageDirectory(),"LUTS");
+        if(!lut.exists()) lut.mkdirs();
+        writeReport(new File(lut,"SC_REVISION_PROBE.TXT"));
+        setText(report.toString()+"\nMENU to exit.");
+    }
+
+    private void writeReport(File f) {
+        try {
+            FileOutputStream os=new FileOutputStream(f,false);
+            os.write(report.toString().getBytes("UTF-8"));
+            os.close();
+            Log.i(TAG,"WROTE "+f.getAbsolutePath());
+        } catch(Throwable t) {
+            Log.e(TAG,"write report failed "+f,t);
         }
-        return true; // swallow other keys during automatic calibration
     }
 
-    @Override public boolean onKeyUp(int keyCode,KeyEvent e) {
-        return true;
-    }
-
-    private void refresh(String status) {
-        if (overlay==null) return;
-        int shownStep=Math.min(step+1,STEP_NAMES.length);
-        String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 COLOR PIPELINE TEST  v0.6 AUTO\n"
-                +"Session: "+sessionName+"\n"
-                +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
-                +"Test: "+expected+"\n"
-                +"Sat range: "+satMin+".."+satMax+"   SC channels: "+maxColorSelectChannels+"\n"
-                +status+"\n"
-                +"Automatic: AF once -> reset -> write -> capture -> next\n"
-                +"DELETE: stop+restore   MENU: restore+exit");
+    private void setText(final String s) {
+        if(overlay==null) return;
+        overlay.setText(s);
     }
 
     @Override public void surfaceCreated(SurfaceHolder h) {
         startPreviewIfReady();
-        maybeStartAuto();
+        maybeStart();
     }
-
     @Override public void surfaceChanged(SurfaceHolder h,int f,int w,int he) {}
-
-    @Override public void surfaceDestroyed(SurfaceHolder h) {
-        previewStarted=false;
-    }
+    @Override public void surfaceDestroyed(SurfaceHolder h) { previewStarted=false; }
 
     private void startPreviewIfReady() {
-        if (normal==null || holder==null || previewStarted) return;
+        if(normal==null || previewStarted || holder==null) return;
         try {
             normal.setPreviewDisplay(holder);
             normal.startPreview();
             previewStarted=true;
-            appendLog("PREVIEW START OK");
         } catch(Throwable t) {
-            failStop("PREVIEW ERROR", t);
+            add("PREVIEW ERROR: "+rootCause(t));
+            finishReport();
         }
     }
 
+    @Override public boolean onKeyDown(int keyCode, KeyEvent e) {
+        int scan=e.getScanCode();
+        if(scan==SCAN_MENU || scan==SCAN_DELETE || keyCode==KeyEvent.KEYCODE_MENU ||
+                keyCode==KeyEvent.KEYCODE_DEL) {
+            try { restoreOriginal(); } catch(Throwable ignored) {}
+            releaseCamera();
+            finish();
+            return true;
+        }
+        return true;
+    }
+    @Override public boolean onKeyUp(int keyCode,KeyEvent e) { return true; }
+
     private void releaseCamera() {
         try { if(normal!=null && previewStarted) normal.stopPreview(); } catch(Throwable ignored) {}
-        try {
-            if(cameraEx!=null) call(cameraEx,"release",new Class[0],new Object[0]);
-        } catch(Throwable ignored) {}
-        normal=null;
-        cameraEx=null;
-        previewStarted=false;
+        try { if(cameraEx!=null) call(cameraEx,"release",new Class[0],new Object[0]); } catch(Throwable ignored) {}
+        normal=null; cameraEx=null; previewStarted=false;
     }
 
     @Override protected void onPause() {
         super.onPause();
-        if (isFinishing()) {
-            autoRunning=false;
-            handler.removeCallbacksAndMessages(null);
-            restoreOriginals();
+        if(isFinishing()) {
+            try { restoreOriginal(); } catch(Throwable ignored) {}
             releaseCamera();
-            appendLog("=== END "+now()+" ===");
         }
     }
 
@@ -739,78 +302,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return m.invoke(o,args);
     }
 
-    private static Object safeCall(Object o,String n) {
-        try { return call(o,n,new Class[0],new Object[0]); }
-        catch(Throwable t) { return null; }
-    }
-
-    private static int intCall(Object o,String n,int def) {
-        try { return ((Integer)call(o,n,new Class[0],new Object[0])).intValue(); }
-        catch(Throwable t) { return def; }
-    }
-
-    private static int getFieldInt(Object o,String n) throws Exception {
-        Field f=o.getClass().getField(n);
-        return f.getInt(o);
-    }
-
-    private static void setFieldInt(Object o,String n,int v) throws Exception {
-        Field f=o.getClass().getField(n);
-        f.setInt(o,v);
-    }
-
-    private static int mod360(int x) {
-        x%=360;
-        return x<0?x+360:x;
-    }
-
-    private static String arr(int[] a) {
-        if(a==null) return "null";
-        StringBuilder s=new StringBuilder("[");
-        for(int i=0;i<a.length;i++){
-            if(i>0)s.append(',');
-            s.append(a[i]);
-        }
-        return s.append(']').toString();
-    }
-
-    private void appendLog(String s) {
-        Log.i(TAG,s);
-        try {
-            FileOutputStream os=new FileOutputStream(logFile,true);
-            os.write((s+"\n").getBytes("UTF-8"));
-            os.close();
-        } catch(Throwable ignored) {}
-    }
-
-    private void appendMap(String line) {
-        try {
-            FileOutputStream os=new FileOutputStream(mapFile,true);
-            os.write((line+"\n").getBytes("UTF-8"));
-            os.close();
-        } catch(Throwable t) {
-            appendLog("MAP LOG ERROR "+stack(t));
-        }
-    }
-
-    private static String csv(String v) {
-        if (v == null) return "";
-        boolean quote = v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0;
-        if (v.indexOf('"') >= 0) v = v.replace("\"", "\"\"");
-        return quote ? "\""+v+"\"" : v;
-    }
-
-    private static String stack(Throwable t) {
+    private static String rootCause(Throwable t) {
         Throwable c=t;
         while(c.getCause()!=null) c=c.getCause();
-        return t.getClass().getSimpleName()+": "+String.valueOf(c);
-    }
-
-    private static String two(int x) {
-        return x<10?"0"+x:String.valueOf(x);
-    }
-
-    private static String now() {
-        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss",Locale.US).format(new Date());
+        return c.getClass().getSimpleName()+": "+String.valueOf(c.getMessage());
     }
 }
