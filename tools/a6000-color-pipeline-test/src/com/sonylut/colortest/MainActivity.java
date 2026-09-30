@@ -17,7 +17,6 @@ import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FileInputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -110,6 +109,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean backupReady;
 
     private File logFile;
+    private File mapFile;
     private File photoRoot;
     private String sessionName;
 
@@ -148,6 +148,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         File lutDir = new File(Environment.getExternalStorageDirectory(), "LUTS");
         if (!lutDir.exists()) lutDir.mkdirs();
         logFile = new File(lutDir, "COLORTEST.LOG");
+        mapFile = new File(lutDir, "COLORTEST_MAP.csv");
+        if (!mapFile.exists()) {
+            appendMap("session,step,test_name,native_filename,native_path,bytes");
+        }
 
         photoRoot = new File(Environment.getExternalStorageDirectory(), "DCIM");
         sessionName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
@@ -413,27 +417,18 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void finishNativeCapture(File src) {
         final int captureStep = step;
-        final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
-        try {
-            File dst = new File(src.getParentFile(), base+".JPG");
-            if (dst.exists() && !dst.delete())
-                throw new RuntimeException("cannot replace existing "+dst.getAbsolutePath());
+        final String stepNo = two(captureStep+1);
+        final String testName = STEP_NAMES[captureStep];
 
-            boolean renamed = src.renameTo(dst);
-            if (!renamed) {
-                copyFile(src, dst);
-                if (!src.delete())
-                    appendLog("WARN source delete failed "+src.getAbsolutePath());
-            }
+        // Do not rename, move, copy or modify Sony's native JPEG.
+        // Record only the step <-> native filename/path relationship.
+        appendLog("MAP "+stepNo+" "+testName+" -> "
+                +src.getAbsolutePath()+" bytes="+src.length());
+        appendMap(csv(sessionName)+","+stepNo+","+csv(testName)+","
+                +csv(src.getName())+","+csv(src.getAbsolutePath())+","+src.length());
 
-            appendLog("CAPTURE OK "+base+" final="+dst.getAbsolutePath()+" bytes="+dst.length()
-                    +" rename="+renamed);
-            refresh("CAPTURE OK: "+dst.getName()+"\nSaved in Sony DCIM folder");
-        } catch (Throwable t) {
-            taking = false;
-            failStop("RENAME FAILED "+base, t);
-            return;
-        }
+        refresh("CAPTURE OK\n"+stepNo+" "+testName+" -> "+src.getName()
+                +"\nMapping logged; native photo untouched.");
 
         taking = false;
         if (captureStep + 1 >= STEP_NAMES.length) {
@@ -495,24 +490,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return best;
     }
 
-    private static void copyFile(File src, File dst) throws Exception {
-        FileInputStream in=new FileInputStream(src);
-        FileOutputStream out=new FileOutputStream(dst);
-        byte[] buf=new byte[65536];
-        int n;
-        while((n=in.read(buf))>0) out.write(buf,0,n);
-        out.flush();
-        out.close();
-        in.close();
-    }
-
     private void finishSequence() {
         autoRunning = false;
         sequenceDone = true;
         appendLog("ALL "+STEP_NAMES.length+" TESTS COMPLETE");
         restoreOriginals();
         appendLog("=== AUTO COMPLETE "+now()+" session="+sessionName+" ===");
-        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nRenamed in Sony DCIM folder.\nParameters restored. MENU to exit.");
+        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nSony filenames untouched; mapping saved in /LUTS/COLORTEST_MAP.csv\nParameters restored. MENU to exit.");
     }
 
     private void restoreOriginals() {
@@ -681,11 +665,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void refresh(String status) {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
-        String expected=two(shownStep)+"_"+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+".JPG";
-        overlay.setText("A6000 COLOR PIPELINE TEST  v0.4 AUTO\n"
+        String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
+        overlay.setText("A6000 COLOR PIPELINE TEST  v0.5 AUTO\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
-                +"Photo: "+expected+"\n"
+                +"Test: "+expected+"\n"
                 +"Sat range: "+satMin+".."+satMax+"   SC channels: "+maxColorSelectChannels+"\n"
                 +status+"\n"
                 +"Automatic: AF once -> reset -> write -> capture -> next\n"
@@ -783,6 +767,23 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             os.write((s+"\n").getBytes("UTF-8"));
             os.close();
         } catch(Throwable ignored) {}
+    }
+
+    private void appendMap(String line) {
+        try {
+            FileOutputStream os=new FileOutputStream(mapFile,true);
+            os.write((line+"\n").getBytes("UTF-8"));
+            os.close();
+        } catch(Throwable t) {
+            appendLog("MAP LOG ERROR "+stack(t));
+        }
+    }
+
+    private static String csv(String v) {
+        if (v == null) return "";
+        boolean quote = v.indexOf(',') >= 0 || v.indexOf('"') >= 0 || v.indexOf('\n') >= 0;
+        if (v.indexOf('"') >= 0) v = v.replace("\"", "\"\"");
+        return quote ? "\""+v+"\"" : v;
     }
 
     private static String stack(Throwable t) {
