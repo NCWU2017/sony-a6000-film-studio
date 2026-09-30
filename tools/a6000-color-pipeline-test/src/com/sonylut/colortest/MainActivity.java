@@ -17,12 +17,17 @@ import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.FileInputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.InvocationHandler;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Sony A6000 color-pipeline calibration probe — automatic sequence.
@@ -88,6 +93,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean sequenceDone;
     private boolean afFinished;
     private int step;
+    private Object shutterProxy;
+    private Set<String> beforeCapturePaths = new HashSet<String>();
+    private File pendingNativeFile;
+    private long pendingNativeSize = -1;
+    private int pendingStableCount;
+    private int nativePollCount;
 
     private int originalSaturation;
     private int satMin = -3;
@@ -163,6 +174,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             if (open == null) throw new NoSuchMethodException("CameraEx.open");
             cameraEx = open.invoke(null, new Object[]{Integer.valueOf(0), null});
             normal = (Camera) call(cameraEx, "getNormalCamera", new Class[0], new Object[0]);
+            installShutterListener();
+            chooseWritableOutputDir();
             backupOriginals();
             startPreviewIfReady();
             maybeStartAuto();
@@ -324,58 +337,188 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void captureCurrentStep() {
-        if (!autoRunning || normal == null || taking) return;
+        if (!autoRunning || cameraEx == null || taking) return;
 
         taking = true;
         final int captureStep = step;
         final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
-        appendLog("CAPTURE START "+base);
+        beforeCapturePaths = collectJpegPaths(photoRoot.getParentFile());
+        pendingNativeFile = null;
+        pendingNativeSize = -1;
+        pendingStableCount = 0;
+        nativePollCount = 0;
+        appendLog("CAPTURE START "+base+" mode=CameraEx.burstableTakePicture");
 
         try {
-            normal.takePicture(null, null, new Camera.PictureCallback() {
-                public void onPictureTaken(byte[] data, Camera camera) {
-                    boolean writeOk = false;
-                    try {
-                        File f = new File(sessionDir, base+".JPG");
-                        if (f.exists()) f.delete();
-                        FileOutputStream os = new FileOutputStream(f);
-                        os.write(data);
-                        os.close();
-                        writeOk = true;
-                        appendLog("CAPTURE OK "+base+" file="+f.getAbsolutePath()+" bytes="+data.length);
-                        refresh("CAPTURE OK: "+f.getName());
-                    } catch (Throwable t) {
-                        appendLog("CAPTURE WRITE ERROR "+stack(t));
-                        refresh("CAPTURE WRITE ERROR: "+t);
-                    }
-
-                    try {
-                        camera.startPreview();
-                        previewStarted = true;
-                    } catch (Throwable t) {
-                        appendLog("PREVIEW RESTART ERROR "+stack(t));
-                    }
-                    taking = false;
-
-                    if (!writeOk) {
-                        failStop("CAPTURE FAILED "+base, new RuntimeException("JPEG write failed"));
-                        return;
-                    }
-
-                    if (captureStep + 1 >= STEP_NAMES.length) {
-                        finishSequence();
-                    } else {
-                        step = captureStep + 1;
-                        handler.postDelayed(new Runnable() {
-                            public void run() { runCurrentStep(); }
-                        }, BETWEEN_SHOTS_MS);
-                    }
-                }
-            });
+            call(cameraEx, "burstableTakePicture", new Class[0], new Object[0]);
+            refresh("NATIVE CAPTURE TRIGGERED: "+base+"\nWaiting for Sony JPEG...");
         } catch (Throwable t) {
             taking = false;
-            failStop("CAPTURE ERROR "+base, t);
+            failStop("NATIVE CAPTURE ERROR "+base, t);
         }
+    }
+
+    private void installShutterListener() throws Exception {
+        final Class<?> iface = Class.forName("com.sony.scalar.hardware.CameraEx$ShutterListener");
+        shutterProxy = Proxy.newProxyInstance(iface.getClassLoader(), new Class[]{iface},
+                new InvocationHandler() {
+                    public Object invoke(Object proxy, Method method, Object[] args) {
+                        if ("onShutter".equals(method.getName())) {
+                            appendLog("SHUTTER CALLBACK");
+                            try {
+                                call(cameraEx, "cancelTakePicture", new Class[0], new Object[0]);
+                            } catch (Throwable t) {
+                                appendLog("cancelTakePicture ERROR "+stack(t));
+                            }
+                            handler.postDelayed(new Runnable() {
+                                public void run() { pollNativeJpeg(); }
+                            }, 700);
+                        }
+                        return null;
+                    }
+                });
+        call(cameraEx, "setShutterListener", new Class[]{iface}, new Object[]{shutterProxy});
+        appendLog("SHUTTER LISTENER OK");
+    }
+
+    private void pollNativeJpeg() {
+        if (!autoRunning || !taking) return;
+        nativePollCount++;
+        File f = findNewJpeg(photoRoot.getParentFile(), beforeCapturePaths);
+        if (f != null) {
+            if (pendingNativeFile == null || !f.getAbsolutePath().equals(pendingNativeFile.getAbsolutePath())) {
+                pendingNativeFile = f;
+                pendingNativeSize = f.length();
+                pendingStableCount = 0;
+                appendLog("NEW JPEG FOUND "+f.getAbsolutePath()+" size="+pendingNativeSize);
+            } else {
+                long len = f.length();
+                if (len > 0 && len == pendingNativeSize) {
+                    pendingStableCount++;
+                } else {
+                    pendingStableCount = 0;
+                    pendingNativeSize = len;
+                }
+                if (pendingStableCount >= 2) {
+                    finishNativeCapture(f);
+                    return;
+                }
+            }
+        }
+        if (nativePollCount >= 20) {
+            taking = false;
+            failStop("CAPTURE FAILED "+two(step+1)+"_"+STEP_NAMES[step],
+                    new RuntimeException("Sony native JPEG not found/stable"));
+            return;
+        }
+        handler.postDelayed(new Runnable() {
+            public void run() { pollNativeJpeg(); }
+        }, 500);
+    }
+
+    private void finishNativeCapture(File src) {
+        final int captureStep = step;
+        final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
+        try {
+            File dst = new File(sessionDir, base+".JPG");
+            copyFile(src, dst);
+            appendLog("CAPTURE OK "+base+" native="+src.getAbsolutePath()
+                    +" copy="+dst.getAbsolutePath()+" bytes="+dst.length());
+            refresh("CAPTURE OK: "+dst.getName()+"\nNative: "+src.getName());
+        } catch (Throwable t) {
+            taking = false;
+            failStop("COPY FAILED "+base, t);
+            return;
+        }
+
+        taking = false;
+        if (captureStep + 1 >= STEP_NAMES.length) {
+            finishSequence();
+        } else {
+            step = captureStep + 1;
+            handler.postDelayed(new Runnable() {
+                public void run() { runCurrentStep(); }
+            }, BETWEEN_SHOTS_MS);
+        }
+    }
+
+    private void chooseWritableOutputDir() {
+        if (sessionDir == null) return;
+        try {
+            if (!sessionDir.exists() && !sessionDir.mkdirs())
+                throw new RuntimeException("mkdir failed: "+sessionDir);
+            File probe = new File(sessionDir, ".write_test");
+            FileOutputStream os = new FileOutputStream(probe);
+            os.write(1);
+            os.close();
+            probe.delete();
+            appendLog("OUTPUT DIR OK "+sessionDir.getAbsolutePath());
+        } catch (Throwable t) {
+            File fallbackRoot = new File(Environment.getExternalStorageDirectory(), "LUTS/COLORTEST");
+            sessionDir = new File(fallbackRoot, sessionName);
+            sessionDir.mkdirs();
+            appendLog("OUTPUT DIR FALLBACK "+sessionDir.getAbsolutePath()+" because "+stack(t));
+        }
+    }
+
+    private static Set<String> collectJpegPaths(File root) {
+        Set<String> out = new HashSet<String>();
+        collectJpegPathsRec(root, out, 0);
+        return out;
+    }
+
+    private static void collectJpegPathsRec(File f, Set<String> out, int depth) {
+        if (f == null || depth > 4) return;
+        File[] a = f.listFiles();
+        if (a == null) return;
+        for (int i=0;i<a.length;i++) {
+            File x=a[i];
+            if (x.isDirectory()) {
+                if (!"COLORTEST".equalsIgnoreCase(x.getName()))
+                    collectJpegPathsRec(x,out,depth+1);
+            } else {
+                String n=x.getName().toUpperCase(Locale.US);
+                if (n.endsWith(".JPG") || n.endsWith(".JPEG"))
+                    out.add(x.getAbsolutePath());
+            }
+        }
+    }
+
+    private static File findNewJpeg(File root, Set<String> before) {
+        return findNewJpegRec(root,before,0,null);
+    }
+
+    private static File findNewJpegRec(File f, Set<String> before, int depth, File best) {
+        if (f == null || depth > 4) return best;
+        File[] a=f.listFiles();
+        if (a == null) return best;
+        for (int i=0;i<a.length;i++) {
+            File x=a[i];
+            if (x.isDirectory()) {
+                if (!"COLORTEST".equalsIgnoreCase(x.getName()))
+                    best=findNewJpegRec(x,before,depth+1,best);
+            } else {
+                String n=x.getName().toUpperCase(Locale.US);
+                if ((n.endsWith(".JPG") || n.endsWith(".JPEG"))
+                        && !before.contains(x.getAbsolutePath())) {
+                    if (best==null || x.lastModified()>best.lastModified()
+                            || (x.lastModified()==best.lastModified() && x.length()>best.length()))
+                        best=x;
+                }
+            }
+        }
+        return best;
+    }
+
+    private static void copyFile(File src, File dst) throws Exception {
+        FileInputStream in=new FileInputStream(src);
+        FileOutputStream out=new FileOutputStream(dst);
+        byte[] buf=new byte[65536];
+        int n;
+        while((n=in.read(buf))>0) out.write(buf,0,n);
+        out.flush();
+        out.close();
+        in.close();
     }
 
     private void finishSequence() {
