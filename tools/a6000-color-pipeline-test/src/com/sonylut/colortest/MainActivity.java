@@ -111,7 +111,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private File logFile;
     private File photoRoot;
-    private File sessionDir;
     private String sessionName;
 
     private static class Sel {
@@ -150,11 +149,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (!lutDir.exists()) lutDir.mkdirs();
         logFile = new File(lutDir, "COLORTEST.LOG");
 
-        photoRoot = new File(new File(Environment.getExternalStorageDirectory(), "DCIM"), "COLORTEST");
-        if (!photoRoot.exists()) photoRoot.mkdirs();
+        photoRoot = new File(Environment.getExternalStorageDirectory(), "DCIM");
         sessionName = new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date());
-        sessionDir = new File(photoRoot, sessionName);
-        sessionDir.mkdirs();
 
         appendLog("\n=== AUTO START "+now()+" session="+sessionName+" ===");
         refresh("Opening CameraEx...");
@@ -175,7 +171,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             cameraEx = open.invoke(null, new Object[]{Integer.valueOf(0), null});
             normal = (Camera) call(cameraEx, "getNormalCamera", new Class[0], new Object[0]);
             installShutterListener();
-            chooseWritableOutputDir();
             backupOriginals();
             startPreviewIfReady();
             maybeStartAuto();
@@ -342,7 +337,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         taking = true;
         final int captureStep = step;
         final String base = two(captureStep+1)+"_"+STEP_NAMES[captureStep];
-        beforeCapturePaths = collectJpegPaths(photoRoot.getParentFile());
+        beforeCapturePaths = collectJpegPaths(photoRoot);
         pendingNativeFile = null;
         pendingNativeSize = -1;
         pendingStableCount = 0;
@@ -384,7 +379,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private void pollNativeJpeg() {
         if (!autoRunning || !taking) return;
         nativePollCount++;
-        File f = findNewJpeg(photoRoot.getParentFile(), beforeCapturePaths);
+        File f = findNewJpeg(photoRoot, beforeCapturePaths);
         if (f != null) {
             if (pendingNativeFile == null || !f.getAbsolutePath().equals(pendingNativeFile.getAbsolutePath())) {
                 pendingNativeFile = f;
@@ -517,7 +512,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         appendLog("ALL "+STEP_NAMES.length+" TESTS COMPLETE");
         restoreOriginals();
         appendLog("=== AUTO COMPLETE "+now()+" session="+sessionName+" ===");
-        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nSaved: /DCIM/COLORTEST/"+sessionName+"\nParameters restored. MENU to exit.");
+        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nRenamed in Sony DCIM folder.\nParameters restored. MENU to exit.");
     }
 
     private void restoreOriginals() {
