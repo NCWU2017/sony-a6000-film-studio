@@ -512,23 +512,27 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void discoverPatchTarget() throws Exception {
-        String ps=execRoot("ps | grep im.elf");
-        scalarPid=parsePid(ps);
-        if(scalarPid<=0) throw new IllegalStateException("im.elf PID not found: "+compact(ps));
+        String scan=execRoot("for f in /proc/[0-9]*/maps; do "
+                +"grep -q libScalarDaemon.so $f 2>/dev/null || continue; "
+                +"x=${f#/proc/}; x=${x%/maps}; echo PID=$x; cat $f | grep libScalarDaemon.so; break; done");
+        scalarPid=parsePidMarker(scan);
+        if(scalarPid<=0)
+            throw new IllegalStateException("ScalarDaemon owner PID not found: "+compact(scan));
         String maps=execRoot("cat /proc/"+scalarPid+"/maps | grep libScalarDaemon.so");
         scalarBias=parseBias(maps);
-        if(scalarBias<=0) throw new IllegalStateException("libScalarDaemon map not found: "+compact(maps));
+        if(scalarBias<=0)
+            throw new IllegalStateException("libScalarDaemon map not found: "+compact(maps));
         patchTarget=scalarBias+PATCH_VMA;
+        appendLog("DISCOVER pid="+scalarPid+" bias=0x"+Long.toHexString(scalarBias)
+                +" target=0x"+Long.toHexString(patchTarget));
     }
 
-    private int parsePid(String s) {
-        String[] lines=s.split("\\n");
-        for(int k=0;k<lines.length;k++) {
-            if(lines[k].indexOf("im.elf")<0 || lines[k].indexOf("grep im.elf")>=0) continue;
-            String[] p=lines[k].trim().split("\\s+");
-            for(int i=0;i<p.length;i++) {
-                try { int n=Integer.parseInt(p[i]); if(n>1) return n; } catch(Throwable ignored) {}
-            }
+    private int parsePidMarker(String s) {
+        int p=s.indexOf("PID=");
+        if(p>=0) {
+            int i=p+4,j=i;
+            while(j<s.length() && Character.isDigit(s.charAt(j))) j++;
+            try { return Integer.parseInt(s.substring(i,j)); } catch(Throwable ignored) {}
         }
         return -1;
     }
@@ -900,7 +904,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 REVISION R_GAIN TEST  v1.3\n"
+        overlay.setText("A6000 REVISION R_GAIN TEST  v1.5\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
