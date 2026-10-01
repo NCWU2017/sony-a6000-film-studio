@@ -263,6 +263,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
     private void runCurrentStep() {
         if (!autoRunning || taking || normal == null) return;
+        if (step == 0 && !patchVerified) {
+            appendLog("VERIFY GATE step0 patchVerified=false -> verifyPatchTargetThenStart");
+            refresh("VERIFY STATE=START\nChecking ScalarDaemon target before BASE...");
+            verifyPatchTargetThenStart();
+            return;
+        }
         try {
             appendLog("STEP "+two(step+1)+" "+STEP_NAMES[step]+" RESET START");
             isolateBase();
@@ -894,7 +900,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 REVISION R_GAIN TEST  v1.1\n"
+        overlay.setText("A6000 REVISION R_GAIN TEST  v1.3\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
