@@ -30,33 +30,8 @@ jobs:
       - name: Prepare v1.2 verification gate
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path("tools/a6000-color-pipeline-test/src/com/sonylut/colortest/MainActivity.java")
-          s = p.read_text()
-          old = """    private void runCurrentStep() {
-        if (!autoRunning || taking || normal == null) return;
-        try {"""
-          new = """    private void runCurrentStep() {
-        if (!autoRunning || taking || normal == null) return;
-        if (step == 0 && !patchVerified) {
-            verifyPatchTargetThenStart();
-            return;
-        }
-        try {"""
-          if old not in s:
-              raise SystemExit("runCurrentStep marker not found")
-          s = s.replace(old, new, 1)
-          s = s.replace("A6000 REVISION R_GAIN TEST  v1.1", "A6000 REVISION R_GAIN TEST  v1.2")
-          p.write_text(s)
-
-          m = Path("tools/a6000-color-pipeline-test/AndroidManifest.xml")
-          x = m.read_text()
-          x = x.replace('android:versionCode="11"', 'android:versionCode="12"')
-          x = x.replace('android:versionName="1.1"', 'android:versionName="1.2"')
-          x = x.replace('android:label="A6000 Revision RGAIN Auto"', 'android:label="A6000 Revision RGAIN Auto v1.2"')
-          m.write_text(x)
-          PY
+          python3 -c 'from pathlib import Path; p=Path("tools/a6000-color-pipeline-test/src/com/sonylut/colortest/MainActivity.java"); s=p.read_text(); old="    private void runCurrentStep() {\\n        if (!autoRunning || taking || normal == null) return;\\n        try {"; new="    private void runCurrentStep() {\\n        if (!autoRunning || taking || normal == null) return;\\nn        if (step == 0 && !patchVerified) {\\n            verifyPatchTargetThenStart();\\n            return;\\n        }\\n        try {"; s=s.replace(old,new,1); s=s.replace("A6000 REVISION R_GAIN TEST  v1.1","A6000 REVISION R_GAIN TEST  v1.2"); p.write_text(s)'
+          python3 -c 'from pathlib import Path; p=Path("tools/a6000-color-pipeline-test/AndroidManifest.xml"); s=p.read_text().replace("android:versionCode=\\\"11\\\"","android:versionCode=\\\"12\\\"").replace("android:versionName=\\\"1.1\\\"","android:versionName=\\\"1.2\\\"").replace("android:label=\\\"A6000 Revision RGAIN Auto\\\"","android:label=\\\"A6000 Revision RGAIN Auto v1.2\\\""); p.write_text(s)'
 
       - name: Compile APK
         shell: bash
