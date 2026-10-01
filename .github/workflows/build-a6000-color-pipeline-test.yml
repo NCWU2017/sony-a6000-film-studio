@@ -27,95 +27,11 @@ jobs:
           "$BT/aapt" version
           "$BT/d8" --version
 
-      - name: Prepare v1.7 Telnet parser fix
+      - name: Prepare v1.7 Telnet echo fix
         shell: bash
         run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          p=Path("tools/a6000-color-pipeline-test/src/com/sonylut/colortest/MainActivity.java")
-          s=p.read_text()
-
-          old='''                String marker="__END_"+System.currentTimeMillis()+"__";
-                out.write((command+"; echo "+marker+"\\r\\n").getBytes("US-ASCII"));
-                out.flush();
-                ByteArrayOutputStream buf=new ByteArrayOutputStream();
-                long deadline=System.currentTimeMillis()+6000;
-                while(System.currentTimeMillis()<deadline) {
-                    try {
-                        int b=readTelnetByte(in,out);
-                        if(b<0) break;
-                        buf.write(b);
-                        String cur=new String(buf.toByteArray(),"ISO-8859-1");
-                        int m=findStandaloneMarker(cur,marker);
-                        if(m>=0) {
-                            telnetPort=ports[pi];
-                            try{sock.close();}catch(Throwable ignored){}
-                            return cur.substring(0,m);
-                        }
-                    } catch(SocketTimeoutException timeout) {}
-                }
-'''
-          new='''                out.write((command+"; echo __DONE_$__\\r\\n").getBytes("US-ASCII"));
-                out.flush();
-                ByteArrayOutputStream buf=new ByteArrayOutputStream();
-                long deadline=System.currentTimeMillis()+6000;
-                while(System.currentTimeMillis()<deadline) {
-                    try {
-                        int b=readTelnetByte(in,out);
-                        if(b<0) break;
-                        buf.write(b);
-                        String cur=new String(buf.toByteArray(),"ISO-8859-1");
-                        int m=findExpandedDoneMarker(cur);
-                        if(m>=0) {
-                            telnetPort=ports[pi];
-                            try{sock.close();}catch(Throwable ignored){}
-                            return cur.substring(0,m);
-                        }
-                    } catch(SocketTimeoutException timeout) {}
-                }
-'''
-          if old not in s:
-              raise SystemExit("telnet marker block not found")
-          s=s.replace(old,new,1)
-
-          old2='''    private static int findStandaloneMarker(String cur,String marker) {
-        int from=0;
-        while(true) {
-            int m=cur.indexOf(marker,from);
-            if(m<0) return -1;
-            boolean lineStart=(m==0 || cur.charAt(m-1)=='\\n' || cur.charAt(m-1)=='\\r');
-            if(lineStart) return m;
-            from=m+marker.length();
-        }
-    }
-'''
-          new2='''    private static int findExpandedDoneMarker(String cur) {
-        String prefix="__DONE_";
-        int from=0;
-        while(true) {
-            int m=cur.indexOf(prefix,from);
-            if(m<0) return -1;
-            int i=m+prefix.length(),j=i;
-            while(j<cur.length() && Character.isDigit(cur.charAt(j))) j++;
-            if(j>i && j+1<cur.length() && cur.charAt(j)=='_' && cur.charAt(j+1)=='_')
-                return m;
-            from=m+prefix.length();
-        }
-    }
-'''
-          if old2 not in s:
-              raise SystemExit("marker helper not found")
-          s=s.replace(old2,new2,1)
-          s=s.replace("A6000 REVISION R_GAIN TEST  v1.6","A6000 REVISION R_GAIN TEST  v1.7")
-          p.write_text(s)
-
-          m=Path("tools/a6000-color-pipeline-test/AndroidManifest.xml")
-          x=m.read_text()
-          import re
-          x=re.sub(r'android:versionCode="\d+"','android:versionCode="17"',x)
-          x=re.sub(r'android:versionName="[^"]+"','android:versionName="1.7"',x)
-          m.write_text(x)
-          PY
+          python3 -c 'from pathlib import Path; p=Path("tools/a6000-color-pipeline-test/src/com/sonylut/colortest/MainActivity.java"); s=p.read_text(); old="    private static int findStandaloneMarker(String cur,String marker) {\\n        int from=0;\\n        while(true) {\\n            int m=cur.indexOf(marker,from);\\n            if(m<0) return -1;\\n            boolean lineStart=(m==0 || cur.charAt(m-1)==\\x27\\\\n\\x27 || cur.charAt(m-1)==\\x27\\\\r\\x27);\\n            if(lineStart) return m;\\n            from=m+marker.length();\\n        }\\n    }\\n"; new="    private static int findStandaloneMarker(String cur,String marker) {\\n        int first=cur.indexOf(marker);\\n        if(first<0) return -1;\\n        return cur.indexOf(marker,first+marker.length());\\n    }\\n"; assert old in s; s=s.replace(old,new,1).replace("A6000 REVISION R_GAIN TEST  v1.6","A6000 REVISION R_GAIN TEST  v1.7"); p.write_text(s)'
+          python3 -c 'from pathlib import Path; import re; p=Path("tools/a6000-color-pipeline-test/AndroidManifest.xml"); s=p.read_text(); s=re.sub(r"android:versionCode=\\\"[0-9]+\\\"","android:versionCode=\\\"17\\\"",s); s=re.sub(r"android:versionName=\\\"[^\\\"]+\\\"","android:versionName=\\\"1.7\\\"",s); p.write_text(s)'
 
       - name: Compile APK
         shell: bash
