@@ -593,7 +593,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         if(b<0) break;
                         buf.write(b);
                         String cur=new String(buf.toByteArray(),"ISO-8859-1");
-                        int m=cur.indexOf(marker);
+                        int m=findStandaloneMarker(cur,marker);
                         if(m>=0) {
                             telnetPort=ports[pi];
                             try{sock.close();}catch(Throwable ignored){}
@@ -609,6 +609,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         }
         throw new RuntimeException("root Telnet unavailable localhost:23/2323",last);
+    }
+
+    private static int findStandaloneMarker(String cur,String marker) {
+        int from=0;
+        while(true) {
+            int m=cur.indexOf(marker,from);
+            if(m<0) return -1;
+            boolean lineStart=(m==0 || cur.charAt(m-1)=='\n' || cur.charAt(m-1)=='\r');
+            if(lineStart) return m;
+            from=m+marker.length();
+        }
     }
 
     private static void drainTelnet(InputStream in,OutputStream out,long ms) throws Exception {
@@ -904,7 +915,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 REVISION R_GAIN TEST  v1.5\n"
+        overlay.setText("A6000 REVISION R_GAIN TEST  v1.6\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
