@@ -17,6 +17,12 @@ import android.widget.TextView;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.ByteArrayOutputStream;
+import java.net.Socket;
+import java.net.InetSocketAddress;
+import java.net.SocketTimeoutException;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -79,7 +85,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean autoRunning;
     private boolean sequenceDone;
     private boolean afFinished;
-    private boolean waitingForExternalPatch;
+    private int telnetPort = -1;
+    private int scalarPid = -1;
+    private long scalarBias = 0;
+    private long patchTarget = 0;
+    private boolean patchVerified = false;
+    private boolean patchApplied = false;
+    private static final long PATCH_VMA = 0x000E2C86L;
+    private static final String BYTES_ORIG = "3b 6c";
+    private static final String BYTES_P4 = "04 23";
     private int step;
     private Object shutterProxy;
     private Set<String> beforeCapturePaths = new HashSet<String>();
@@ -399,20 +413,247 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         taking = false;
         if (captureStep == 0) {
-            step = 1;
-            waitingForExternalPatch = true;
-            refresh("01 BASE captured -> "+src.getName()
-                    +"\nNow apply temporary R_GAIN=+4 patch externally."
-                    +"\nPress CENTER/OK after patch readback is confirmed.");
+            patchPlus4ThenNext();
         } else if (captureStep == 1) {
-            step = 2;
-            waitingForExternalPatch = true;
-            refresh("02 +4 captured -> "+src.getName()
-                    +"\nNow RESTORE original bytes externally."
-                    +"\nPress CENTER/OK after restore readback is confirmed.");
+            restorePatchThenNext();
         } else {
             finishSequence();
         }
+    }
+
+
+    private void verifyPatchTargetThenStart() {
+        refresh("Verifying ScalarDaemon target...");
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    discoverPatchTarget();
+                    String rb=readPatchBytes();
+                    if(!BYTES_ORIG.equals(rb))
+                        throw new IllegalStateException("target bytes="+rb+" expected="+BYTES_ORIG);
+                    patchVerified=true;
+                    appendLog("PATCH TARGET PASS pid="+scalarPid
+                            +" bias=0x"+Long.toHexString(scalarBias)
+                            +" target=0x"+Long.toHexString(patchTarget)
+                            +" bytes="+rb+" port="+telnetPort);
+                    handler.post(new Runnable() {
+                        public void run() { step=0; runCurrentStep(); }
+                    });
+                } catch(final Throwable t) {
+                    handler.post(new Runnable() {
+                        public void run() { failStop("PATCH VERIFY ERROR",t); }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void patchPlus4ThenNext() {
+        refresh("01 BASE captured. Applying R_GAIN=+4...");
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    if(!patchVerified) throw new IllegalStateException("patch target not verified");
+                    writePatch(true);
+                    String rb=readPatchBytes();
+                    if(!BYTES_P4.equals(rb))
+                        throw new IllegalStateException("patch readback="+rb+" expected="+BYTES_P4);
+                    patchApplied=true;
+                    appendLog("PATCH +4 PASS target=0x"+Long.toHexString(patchTarget));
+                    handler.post(new Runnable() {
+                        public void run() {
+                            step=1;
+                            handler.postDelayed(new Runnable() {
+                                public void run() { runCurrentStep(); }
+                            }, BETWEEN_SHOTS_MS);
+                        }
+                    });
+                } catch(final Throwable t) {
+                    handler.post(new Runnable() {
+                        public void run() { failStop("PATCH +4 ERROR",t); }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void restorePatchThenNext() {
+        refresh("02 +4 captured. Restoring original instruction...");
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    writePatch(false);
+                    String rb=readPatchBytes();
+                    if(!BYTES_ORIG.equals(rb))
+                        throw new IllegalStateException("restore readback="+rb+" expected="+BYTES_ORIG);
+                    patchApplied=false;
+                    appendLog("PATCH RESTORE PASS");
+                    handler.post(new Runnable() {
+                        public void run() {
+                            step=2;
+                            handler.postDelayed(new Runnable() {
+                                public void run() { runCurrentStep(); }
+                            }, BETWEEN_SHOTS_MS);
+                        }
+                    });
+                } catch(final Throwable t) {
+                    handler.post(new Runnable() {
+                        public void run() { failStop("PATCH RESTORE ERROR",t); }
+                    });
+                }
+            }
+        }).start();
+    }
+
+    private void discoverPatchTarget() throws Exception {
+        String ps=execRoot("ps | grep im.elf");
+        scalarPid=parsePid(ps);
+        if(scalarPid<=0) throw new IllegalStateException("im.elf PID not found: "+compact(ps));
+        String maps=execRoot("cat /proc/"+scalarPid+"/maps | grep libScalarDaemon.so");
+        scalarBias=parseBias(maps);
+        if(scalarBias<=0) throw new IllegalStateException("libScalarDaemon map not found: "+compact(maps));
+        patchTarget=scalarBias+PATCH_VMA;
+    }
+
+    private int parsePid(String s) {
+        String[] lines=s.split("\\n");
+        for(int k=0;k<lines.length;k++) {
+            if(lines[k].indexOf("im.elf")<0 || lines[k].indexOf("grep im.elf")>=0) continue;
+            String[] p=lines[k].trim().split("\\s+");
+            for(int i=0;i<p.length;i++) {
+                try { int n=Integer.parseInt(p[i]); if(n>1) return n; } catch(Throwable ignored) {}
+            }
+        }
+        return -1;
+    }
+
+    private long parseBias(String maps) {
+        String[] lines=maps.split("\\n");
+        for(int k=0;k<lines.length;k++) {
+            String line=lines[k].trim();
+            if(line.indexOf("libScalarDaemon.so")<0) continue;
+            String[] p=line.split("\\s+");
+            if(p.length<3) continue;
+            int dash=p[0].indexOf('-');
+            if(dash<1) continue;
+            try {
+                long start=Long.parseLong(p[0].substring(0,dash),16);
+                long off=Long.parseLong(p[2],16);
+                return start-off;
+            } catch(Throwable ignored) {}
+        }
+        return 0;
+    }
+
+    private String readPatchBytes() throws Exception {
+        String out=execRoot("dd if=/proc/"+scalarPid+"/mem bs=1 skip="+patchTarget
+                +" count=2 2>/dev/null | od -An -tx1");
+        String z=out.toLowerCase(Locale.US);
+        if(z.indexOf("3b 6c")>=0) return BYTES_ORIG;
+        if(z.indexOf("04 23")>=0) return BYTES_P4;
+        return compact(out);
+    }
+
+    private void writePatch(boolean enable) throws Exception {
+        String oct=enable ? "\\004\\043" : "\\073\\154";
+        execRoot("printf '"+oct+"' | dd of=/proc/"+scalarPid+"/mem bs=1 seek="+patchTarget
+                +" count=2 conv=notrunc 2>/dev/null");
+    }
+
+    private String execRoot(String command) throws Exception {
+        int[] ports=telnetPort>0 ? new int[]{telnetPort} : new int[]{23,2323};
+        Throwable last=null;
+        for(int pi=0;pi<ports.length;pi++) {
+            Socket sock=null;
+            try {
+                sock=new Socket();
+                sock.connect(new InetSocketAddress("127.0.0.1",ports[pi]),1500);
+                sock.setSoTimeout(400);
+                InputStream in=sock.getInputStream();
+                OutputStream out=sock.getOutputStream();
+                drainTelnet(in,out,250);
+                String marker="__END_"+System.currentTimeMillis()+"__";
+                out.write((command+"; echo "+marker+"\r\n").getBytes("US-ASCII"));
+                out.flush();
+                ByteArrayOutputStream buf=new ByteArrayOutputStream();
+                long deadline=System.currentTimeMillis()+6000;
+                while(System.currentTimeMillis()<deadline) {
+                    try {
+                        int b=readTelnetByte(in,out);
+                        if(b<0) break;
+                        buf.write(b);
+                        String cur=new String(buf.toByteArray(),"ISO-8859-1");
+                        int m=cur.indexOf(marker);
+                        if(m>=0) {
+                            telnetPort=ports[pi];
+                            try{sock.close();}catch(Throwable ignored){}
+                            return cur.substring(0,m);
+                        }
+                    } catch(SocketTimeoutException timeout) {}
+                }
+                throw new RuntimeException("root command timeout port="+ports[pi]
+                        +" out="+compact(new String(buf.toByteArray(),"ISO-8859-1")));
+            } catch(Throwable t) {
+                last=t;
+                if(sock!=null) try{sock.close();}catch(Throwable ignored){}
+            }
+        }
+        throw new RuntimeException("root Telnet unavailable localhost:23/2323",last);
+    }
+
+    private static void drainTelnet(InputStream in,OutputStream out,long ms) throws Exception {
+        long end=System.currentTimeMillis()+ms;
+        while(System.currentTimeMillis()<end) {
+            try { readTelnetByte(in,out); }
+            catch(SocketTimeoutException t) { break; }
+        }
+    }
+
+    private static int readTelnetByte(InputStream in,OutputStream out) throws Exception {
+        int b=in.read();
+        if(b!=255) return b;
+        int cmd=in.read();
+        if(cmd<0) return -1;
+        if(cmd==255) return 255;
+        if(cmd==250) {
+            int prev=-1;
+            while(true) {
+                int x=in.read();
+                if(x<0) return -1;
+                if(prev==255 && x==240) break;
+                prev=x;
+            }
+            return readTelnetByte(in,out);
+        }
+        int opt=in.read();
+        if(opt<0) return -1;
+        if(cmd==251 || cmd==252) out.write(new byte[]{(byte)255,(byte)254,(byte)opt});
+        else if(cmd==253 || cmd==254) out.write(new byte[]{(byte)255,(byte)252,(byte)opt});
+        out.flush();
+        return readTelnetByte(in,out);
+    }
+
+    private void restorePatchFailsafe(final String why) {
+        if(!patchApplied || patchTarget==0) return;
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    writePatch(false);
+                    String rb=readPatchBytes();
+                    appendLog("FAILSAFE "+why+" restore="+rb);
+                    if(BYTES_ORIG.equals(rb)) patchApplied=false;
+                } catch(Throwable t) {
+                    appendLog("FAILSAFE "+why+" ERROR "+stack(t)+" ; power-cycle camera to restore");
+                }
+            }
+        }).start();
+    }
+
+    private static String compact(String s) {
+        if(s==null) return "";
+        s=s.replace('\r',' ').replace('\n',' ').trim();
+        while(s.indexOf("  ")>=0) s=s.replace("  "," ");
+        return s.length()>180 ? s.substring(0,180) : s;
     }
 
     private static Set<String> collectJpegPaths(File root) {
@@ -619,6 +860,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         autoRunning = false;
         appendLog(where+" "+stack(t));
         restoreOriginals();
+        restorePatchFailsafe(where);
         refresh("STOPPED\n"+where+"\n"+stack(t)+"\nParameters restored. MENU to exit.");
     }
 
@@ -628,6 +870,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             autoRunning=false;
             handler.removeCallbacksAndMessages(null);
             restoreOriginals();
+            restorePatchFailsafe("MENU");
             releaseCamera();
             finish();
             return true;
@@ -636,15 +879,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             autoRunning=false;
             handler.removeCallbacksAndMessages(null);
             restoreOriginals();
+            restorePatchFailsafe("DELETE");
             refresh("AUTO STOPPED manually. Parameters restored. MENU to exit.");
-            return true;
-        }
-        if (waitingForExternalPatch &&
-                (keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)) {
-            waitingForExternalPatch=false;
-            handler.postDelayed(new Runnable() {
-                public void run() { runCurrentStep(); }
-            }, BETWEEN_SHOTS_MS);
             return true;
         }
         return true; // swallow other keys during automatic calibration
@@ -658,13 +894,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 REVISION R_GAIN TEST  v1.0\n"
+        overlay.setText("A6000 REVISION R_GAIN TEST  v1.1\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
                 +"Sat range: "+satMin+".."+satMax+"   SC channels: "+maxColorSelectChannels+"\n"
                 +status+"\n"
-                +"Flow: BASE -> external +4 patch -> +4 shot -> restore -> final shot\n"
+                +"Flow: verify -> BASE -> auto +4 -> +4 shot -> auto restore -> final shot\n"
                 +"DELETE: stop+restore   MENU: restore+exit");
     }
 
@@ -707,6 +943,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             autoRunning=false;
             handler.removeCallbacksAndMessages(null);
             restoreOriginals();
+            restorePatchFailsafe("ONPAUSE");
             releaseCamera();
             appendLog("=== END "+now()+" ===");
         }
