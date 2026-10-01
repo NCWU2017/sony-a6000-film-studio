@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.sonylut.colortest.v08"
-    android:versionCode="9"
-    android:versionName="0.9b">
+    android:versionCode="10"
+    android:versionName="1.0">
     <uses-sdk android:minSdkVersion="10" android:targetSdkVersion="10" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <application android:label="A6000 Revision YCbCr">
+    <application android:label="A6000 Revision RGAIN">
         <activity android:name="com.sonylut.colortest.MainActivity"
             android:label="A6000 Color Test"
             android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
