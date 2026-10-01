@@ -52,13 +52,9 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final long BETWEEN_SHOTS_MS = 1100;
 
     private static final String[] STEP_NAMES = new String[] {
-        "REV_BASE",
-        "REV_Y_P32",
-        "REV_Y_M32",
-        "REV_CB_P32",
-        "REV_CB_M32",
-        "REV_CR_P32",
-        "REV_CR_M32"
+        "REV_RGAIN_0_BASE",
+        "REV_RGAIN_P4",
+        "REV_RGAIN_0_RESTORE"
     };
 
     private static final int[] MTX_ID = {
@@ -83,6 +79,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private boolean autoRunning;
     private boolean sequenceDone;
     private boolean afFinished;
+    private boolean waitingForExternalPatch;
     private int step;
     private Object shutterProxy;
     private Set<String> beforeCapturePaths = new HashSet<String>();
@@ -275,22 +272,12 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             throw new IllegalStateException("getMaxColorSelectChannels="+maxColorSelectChannels);
 
         Sel color = redRef();
-        switch (idx) {
-            case 0: break;
-            case 1: color.y = 32; break;
-            case 2: color.y = -32; break;
-            case 3: color.cb = 32; break;
-            case 4: color.cb = -32; break;
-            case 5: color.cr = 32; break;
-            case 6: color.cr = -32; break;
-            default: throw new IllegalArgumentException("bad step "+idx);
-        }
-
         setSelected(0, "revision", color);
 
         String mode = readColorSelectMode();
         Sel rb = readSelected(0);
-        appendLog("STEP "+two(idx+1)+" revision immediate mode="+mode+" ch0="+rb);
+        appendLog("STEP "+two(idx+1)+" "+STEP_NAMES[idx]
+                +" mode="+mode+" ch0="+rb);
         if (!"revision".equals(mode))
             throw new IllegalStateException("revision did not stick, readback="+mode);
     }
@@ -411,13 +398,20 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 +"\nMapping logged; native photo untouched.");
 
         taking = false;
-        if (captureStep + 1 >= STEP_NAMES.length) {
-            finishSequence();
+        if (captureStep == 0) {
+            step = 1;
+            waitingForExternalPatch = true;
+            refresh("01 BASE captured -> "+src.getName()
+                    +"\nNow apply temporary R_GAIN=+4 patch externally."
+                    +"\nPress CENTER/OK after patch readback is confirmed.");
+        } else if (captureStep == 1) {
+            step = 2;
+            waitingForExternalPatch = true;
+            refresh("02 +4 captured -> "+src.getName()
+                    +"\nNow RESTORE original bytes externally."
+                    +"\nPress CENTER/OK after restore readback is confirmed.");
         } else {
-            step = captureStep + 1;
-            handler.postDelayed(new Runnable() {
-                public void run() { runCurrentStep(); }
-            }, BETWEEN_SHOTS_MS);
+            finishSequence();
         }
     }
 
@@ -476,7 +470,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         appendLog("ALL "+STEP_NAMES.length+" TESTS COMPLETE");
         restoreOriginals();
         appendLog("=== AUTO COMPLETE "+now()+" session="+sessionName+" ===");
-        refresh("COMPLETE: "+STEP_NAMES.length+" photos\nSony filenames untouched; mapping saved in /LUTS/COLORTEST_MAP.csv\nParameters restored. MENU to exit.");
+        refresh("COMPLETE: 3 photos\n01 R_GAIN=0  02 R_GAIN=+4  03 RESTORED=0\nMapping saved in /LUTS/COLORTEST_MAP.csv\nParameters restored. MENU to exit.");
     }
 
     private void restoreOriginals() {
@@ -645,6 +639,14 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             refresh("AUTO STOPPED manually. Parameters restored. MENU to exit.");
             return true;
         }
+        if (waitingForExternalPatch &&
+                (keyCode==KeyEvent.KEYCODE_DPAD_CENTER || keyCode==KeyEvent.KEYCODE_ENTER)) {
+            waitingForExternalPatch=false;
+            handler.postDelayed(new Runnable() {
+                public void run() { runCurrentStep(); }
+            }, BETWEEN_SHOTS_MS);
+            return true;
+        }
         return true; // swallow other keys during automatic calibration
     }
 
@@ -656,13 +658,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (overlay==null) return;
         int shownStep=Math.min(step+1,STEP_NAMES.length);
         String expected=two(shownStep)+" "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)];
-        overlay.setText("A6000 REVISION YCbCr TEST  v0.9 AUTO\n"
+        overlay.setText("A6000 REVISION R_GAIN TEST  v1.0\n"
                 +"Session: "+sessionName+"\n"
                 +"Step "+two(shownStep)+"/"+STEP_NAMES.length+"  "+STEP_NAMES[Math.min(step,STEP_NAMES.length-1)]+"\n"
                 +"Test: "+expected+"\n"
                 +"Sat range: "+satMin+".."+satMax+"   SC channels: "+maxColorSelectChannels+"\n"
                 +status+"\n"
-                +"Automatic: AF once -> reset -> revision YCbCr -> capture -> next\n"
+                +"Flow: BASE -> external +4 patch -> +4 shot -> restore -> final shot\n"
                 +"DELETE: stop+restore   MENU: restore+exit");
     }
 
