@@ -512,29 +512,43 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void discoverPatchTarget() throws Exception {
-        String scan=execRoot("for f in /proc/[0-9]*/maps; do "
-                +"grep -q libScalarDaemon.so $f 2>/dev/null || continue; "
-                +"x=${f#/proc/}; x=${x%/maps}; echo PID=$x; cat $f | grep libScalarDaemon.so; break; done");
-        scalarPid=parsePidMarker(scan);
+        // Fast path: V3.21 commonly has im.elf at PID 148.
+        String maps=execRoot("cat /proc/148/maps 2>/dev/null | grep libScalarDaemon.so");
+        if(maps.indexOf("libScalarDaemon.so")>=0) {
+            scalarPid=148;
+        } else {
+            // Robust fallback: enumerate numeric /proc entries in Java.
+            String procList=execRoot("ls /proc");
+            String[] toks=procList.split("[^0-9]+");
+            int found=-1;
+            for(int i=0;i<toks.length;i++) {
+                if(toks[i].length()==0) continue;
+                int pid;
+                try { pid=Integer.parseInt(toks[i]); } catch(Throwable ignored) { continue; }
+                if(pid<=1 || pid>65535) continue;
+                String m=execRoot("cat /proc/"+pid+"/maps 2>/dev/null | grep libScalarDaemon.so");
+                if(m.indexOf("libScalarDaemon.so")>=0) {
+                    found=pid;
+                    maps=m;
+                    break;
+                }
+            }
+            scalarPid=found;
+        }
+
         if(scalarPid<=0)
-            throw new IllegalStateException("ScalarDaemon owner PID not found: "+compact(scan));
-        String maps=execRoot("cat /proc/"+scalarPid+"/maps | grep libScalarDaemon.so");
+            throw new IllegalStateException("ScalarDaemon owner PID not found via /proc scan");
+
+        if(maps==null || maps.indexOf("libScalarDaemon.so")<0)
+            maps=execRoot("cat /proc/"+scalarPid+"/maps 2>/dev/null | grep libScalarDaemon.so");
+
         scalarBias=parseBias(maps);
         if(scalarBias<=0)
             throw new IllegalStateException("libScalarDaemon map not found: "+compact(maps));
+
         patchTarget=scalarBias+PATCH_VMA;
         appendLog("DISCOVER pid="+scalarPid+" bias=0x"+Long.toHexString(scalarBias)
                 +" target=0x"+Long.toHexString(patchTarget));
-    }
-
-    private int parsePidMarker(String s) {
-        int p=s.indexOf("PID=");
-        if(p>=0) {
-            int i=p+4,j=i;
-            while(j<s.length() && Character.isDigit(s.charAt(j))) j++;
-            try { return Integer.parseInt(s.substring(i,j)); } catch(Throwable ignored) {}
-        }
-        return -1;
     }
 
     private long parseBias(String maps) {
